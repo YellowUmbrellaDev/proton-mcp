@@ -2,35 +2,13 @@ package mcpserver
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
-
-// callRaw is call, but a binary payload comes back as bytes.
-func callRaw(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) (text string, blob []byte, isErr bool) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
-	if err != nil {
-		t.Fatalf("%s: protocol error: %v", name, err)
-	}
-	for _, c := range res.Content {
-		switch c := c.(type) {
-		case *mcp.TextContent:
-			text += c.Text
-		case *mcp.EmbeddedResource:
-			blob = append(blob, c.Resource.Blob...)
-		}
-	}
-	return text, blob, res.IsError
-}
 
 type mailRow struct {
 	ID             string   `json:"id"`

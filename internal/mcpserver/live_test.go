@@ -453,3 +453,24 @@ func TestLiveCalendarAndPass(t *testing.T) {
 	ok("pass_vaults_delete", map[string]any{"ref": []any{vault}, "confirm": true})
 	ok("pass_vaults_delete", map[string]any{"ref": []any{vault2}, "confirm": true})
 }
+
+// callRaw is call, but a binary payload comes back as bytes instead of a label.
+// Downloads can be large, so it waits longer.
+func callRaw(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) (text string, blob []byte, isErr bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("%s: protocol error: %v", name, err)
+	}
+	for _, c := range res.Content {
+		switch c := c.(type) {
+		case *mcp.TextContent:
+			text += c.Text
+		case *mcp.EmbeddedResource:
+			blob = append(blob, c.Resource.Blob...)
+		}
+	}
+	return text, blob, res.IsError
+}
