@@ -16,11 +16,8 @@ package mcpauth
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
-
-	"github.com/modelcontextprotocol/go-sdk/auth"
 )
 
 // Scopes the server understands. A tool that changes anything needs ScopeWrite.
@@ -90,37 +87,14 @@ type Config struct {
 	Now func() time.Time
 	// Lifetimes; zero values mean: code 60s, access 1h, refresh 30 days.
 	CodeTTL, AccessTTL, RefreshTTL time.Duration
+	// RateLimit bounds requests per client IP to /register, /authorize, /token
+	// and /revoke; the zero value means 20 a minute with bursts of 10.
+	RateLimit RateLimit
+	// ClientIP names the client of a request for the rate limit. The default is
+	// the host of RemoteAddr; behind a reverse proxy, set it to read the
+	// header the proxy writes (and only trust that header from the proxy).
+	ClientIP func(*http.Request) string
 }
 
-// Server is the authorization server.
-type Server struct{}
-
-var errNotImplemented = errors.New("mcpauth: not implemented yet")
-
-// New builds the server.
-func New(cfg Config) (*Server, error) { return nil, errNotImplemented }
-
-// Handler serves everything the authorization server owns: the well-known
-// metadata documents, /register, /authorize, the login pages, /token and
-// /revoke. It does not serve MCPPath.
-func (s *Server) Handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, errNotImplemented.Error(), http.StatusNotImplemented)
-	})
-}
-
-// Verifier checks the bearer token of an MCP request and returns who it is for:
-// TokenInfo.UserID is the Subject (the saved Proton session to act as),
-// TokenInfo.Scopes what the grant allows, TokenInfo.Extra["grant"] its id.
-func (s *Server) Verifier() auth.TokenVerifier {
-	return func(context.Context, string, *http.Request) (*auth.TokenInfo, error) {
-		return nil, auth.ErrInvalidToken
-	}
-}
-
-// ResourceMetadataURL is the URL of the protected resource metadata document,
-// for the WWW-Authenticate header of a 401.
-func (s *Server) ResourceMetadataURL() string { return "" }
-
-// Close releases the state.
-func (s *Server) Close() error { return nil }
+// The authorization server itself (Server, New, Handler, Verifier,
+// ResourceMetadataURL, Close) is in server.go and the files next to it.
