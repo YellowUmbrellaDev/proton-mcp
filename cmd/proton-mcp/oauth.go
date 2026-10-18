@@ -18,8 +18,8 @@ import (
 
 // newLogin builds the sign-in the authorization server sends people through: the
 // Proton "sign in with another device" flow.
-var newLogin = func() (mcpauth.Login, error) {
-	return protonlogin.New(protonlogin.Config{})
+var newLogin = func(cfg protonlogin.Config) (mcpauth.Login, error) {
+	return protonlogin.New(cfg)
 }
 
 // forwardedClientIP names the client of a request for the rate limit when the

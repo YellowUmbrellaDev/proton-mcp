@@ -27,6 +27,7 @@ import (
 	"github.com/roman-16/proton-cli/internal/mcpauth"
 	"github.com/roman-16/proton-cli/internal/profile"
 	"github.com/roman-16/proton-cli/internal/proton"
+	"github.com/roman-16/proton-cli/internal/service/account"
 )
 
 var (
@@ -46,6 +47,10 @@ const (
 	retention = 10 * time.Minute
 	// revokeTimeout bounds one best-effort revoke of a session nobody will use.
 	revokeTimeout = 10 * time.Second
+	// forgetWarnEvery is how many failed revokes in a row of one subject's session
+	// pass before the operator is told to revoke it by hand, and again after each
+	// as many more.
+	forgetWarnEvery = 10
 )
 
 // Config is what New needs; every field has a default.
@@ -59,6 +64,13 @@ type Config struct {
 	NewSubject func() string
 	TTL        time.Duration
 	Logger     *slog.Logger
+	// KeepAnonymousSession leaves the anonymous session a sign-in was opened under
+	// standing when the sign-in is approved, instead of revoking it. It is an
+	// escape hatch: whether Proton ends the session the fork issued along with the
+	// one it was forked from has not been seen against the real service, and if it
+	// does, every approved sign-in would die at once. Every end but Approved
+	// revokes the anonymous session either way.
+	KeepAnonymousSession bool
 }
 
 // Login implements mcpauth.Login against Proton.
@@ -68,12 +80,14 @@ type Login struct {
 	// newCode makes the fork code; fork.New, except in tests.
 	newCode func(userCode, clientID string) (fork.Code, error)
 
-	// mu guards attempts and closed. When both are needed it is taken after an
-	// attempt's own mutex, never before - except by purgeLocked, which only ever
-	// TryLocks an attempt.
+	// mu guards attempts, closed and forgetFailures. When both are needed it is
+	// taken after an attempt's own mutex, never before - except by purgeLocked,
+	// which only ever TryLocks an attempt.
 	mu       sync.Mutex
 	attempts map[string]*attempt
 	closed   bool
+	// forgetFailures counts, per subject, the Forgets in a row whose revoke failed.
+	forgetFailures map[string]int
 	// revokes tracks the background revokes, so Close (and tests) can wait.
 	revokes sync.WaitGroup
 }
@@ -93,8 +107,9 @@ type attempt struct {
 	code     fork.Code
 	subject  profile.Name
 	// anon is the anonymous session the fork was opened under, set aside when an
-	// approved fork makes client take up the session it issued. It is not the
-	// subject's, so every end but Approved revokes it as well as the issued one.
+	// approved fork makes client take up the session it issued. It is never the
+	// subject's: every end revokes it, Approved included unless
+	// Config.KeepAnonymousSession says otherwise.
 	anon *proton.Client
 	// expires is fixed when the attempt is made and never written again, so
 	// purgeLocked may read it without mu.
@@ -123,7 +138,7 @@ func New(cfg Config) (*Login, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
-	return &Login{cfg: cfg, newCode: fork.New, attempts: map[string]*attempt{}}, nil
+	return &Login{cfg: cfg, newCode: fork.New, attempts: map[string]*attempt{}, forgetFailures: map[string]int{}}, nil
 }
 
 func randomSubject() string { return "u" + randomHex(8) }
@@ -295,7 +310,12 @@ func (l *Login) end(a *attempt, s mcpauth.Status) mcpauth.Status {
 
 // endLocked is end for a caller holding both a.mu and l.mu. An attempt that ends
 // anything but Approved has its session revoked; one that ends Approved hands the
-// session to its subject and must never touch it again.
+// session to its subject and must never touch it again. The anonymous session the
+// fork was opened under is nobody's either way, so it is revoked on every end.
+//
+// Approved is only ever recorded once finish has saved the subject's session and
+// opened the account with it, so revoking the anonymous one here comes after the
+// subject's is safe on disk.
 func (l *Login) endLocked(a *attempt, s mcpauth.Status) mcpauth.Status {
 	if a.status != nil {
 		return *a.status
@@ -304,13 +324,59 @@ func (l *Login) endLocked(a *attempt, s mcpauth.Status) mcpauth.Status {
 	c, anon := a.client, a.anon
 	a.client, a.anon = nil, nil
 	a.code = fork.Code{}
-	if s.State != mcpauth.Approved {
+	switch {
+	case s.State != mcpauth.Approved:
 		l.revokeLater(c)
 		if anon != nil {
 			l.revokeLater(anon)
 		}
+	case anon != nil && !l.cfg.KeepAnonymousSession:
+		l.revokeAnonymous(anon, c)
 	}
 	return s
+}
+
+// revokeAnonymous revokes the anonymous session of an approved sign-in, the same
+// way revokeLater does, and then reads the account once with the subject's own
+// client. Proton has not been seen to end a forked session with the session it
+// was forked from, but if it does, that read is refused and the operator is told
+// which flag keeps the anonymous sessions instead. Nothing is undone: the
+// anonymous session cannot be brought back. Called with l.mu held.
+func (l *Login) revokeAnonymous(anon, subject *proton.Client) {
+	uid, _, _ := anon.Tokens()
+	if uid == "" {
+		return
+	}
+	l.revokes.Add(1)
+	go func() {
+		defer l.revokes.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
+		defer cancel()
+		if err := anon.RevokeSession(ctx, uid); err != nil && !gone(err) {
+			l.cfg.Logger.Debug("the anonymous session of an approved sign-in could not be revoked", "error", err.Error())
+			return
+		}
+		// The client still saves a refreshed session through the hook AdoptFork
+		// gave it; reading the file back first keeps it from spending a refresh
+		// token a tool call of the subject's has already replaced.
+		subject.SetReloadHook(func() (string, string, bool) {
+			name, err := profile.Parse(subject.Profile())
+			if err != nil {
+				return "", "", false
+			}
+			stored, err := session.Load(name)
+			if err != nil || stored == nil {
+				return "", "", false
+			}
+			return stored.AccessToken, stored.RefreshToken, true
+		})
+		check, cancelCheck := context.WithTimeout(context.Background(), revokeTimeout)
+		defer cancelCheck()
+		if _, err := account.New(subject, nil).Get(check); errors.Is(err, proton.ErrUnauthorized) {
+			l.cfg.Logger.Warn("a sign-in was approved, but its session was refused right after the anonymous session it was opened under was revoked: revoking that session may end the new one. If every sign-in fails this way, run with -keep-anonymous-session",
+				"subject", subject.Profile())
+		}
+	}()
 }
 
 // revokeLater revokes the session c holds, in the background and within
@@ -394,9 +460,12 @@ func (l *Login) abandon(a *attempt, approved *proton.ForkedSession, msg string) 
 }
 
 // Forget revokes the subject's session at Proton and removes everything this
-// machine holds for it. Revoking fails open only for the answers that mean it is
-// already gone; a failure that says nothing about the session (no connection, a
-// busy server) is returned with the files untouched, so retrying converges.
+// machine holds for it. Revoking fails open only for the answers that mean the
+// session is already gone. Any other failure is returned with the files
+// untouched, since they are the only way left to revoke the session, and the
+// caller's retry converges: Forget is idempotent. A revoke that keeps failing is
+// still retried, and every forgetWarnEvery failures in a row the operator is told
+// to revoke the session by hand.
 func (l *Login) Forget(ctx context.Context, subject string) error {
 	name, err := subjectName(subject)
 	if err != nil {
@@ -410,19 +479,43 @@ func (l *Login) Forget(ctx context.Context, subject string) error {
 		c := l.newClient(name)
 		c.SetTokens(sess.UID, sess.AccessToken, sess.RefreshToken)
 		if err := c.RevokeSession(ctx, sess.UID); err != nil && !gone(err) {
+			l.revokeFailed(name, err)
 			return fmt.Errorf("protonlogin: revoke the session at Proton: %w", err)
 		}
 	}
+	l.mu.Lock()
+	delete(l.forgetFailures, name.String())
+	l.mu.Unlock()
 	return app.Forget(name)
 }
 
+// revokeFailed counts a failed revoke of the subject's session and, every
+// forgetWarnEvery in a row, says so where the operator will see it.
+func (l *Login) revokeFailed(name profile.Name, err error) {
+	l.mu.Lock()
+	l.forgetFailures[name.String()]++
+	n := l.forgetFailures[name.String()]
+	l.mu.Unlock()
+	if n%forgetWarnEvery != 0 {
+		return
+	}
+	attrs := []any{"subject", name.String(), "failures", n}
+	var apiErr *proton.APIError
+	if errors.As(err, &apiErr) {
+		attrs = append(attrs, "status", apiErr.HTTPStatus, "code", apiErr.Code)
+	}
+	l.cfg.Logger.Warn("the Proton session of a signed-out subject could not be revoked. Its saved session is kept and revoking is retried, but until it succeeds the session is live: revoke it by hand from the session list in the Proton account's security settings", attrs...)
+}
+
 // gone says whether a failed revoke means the session no longer exists at
-// Proton: already revoked, expired beyond refreshing, or never there.
+// Proton, so there is nothing left to revoke: ErrUnauthorized (the session was
+// refused and could not be refreshed: revoked, expired or never there) or a 404.
+// Every other answer - another 4xx, a 5xx, no answer at all - says nothing about
+// the session being gone.
 func gone(err error) bool {
 	if errors.Is(err, proton.ErrUnauthorized) {
 		return true
 	}
 	var apiErr *proton.APIError
-	return errors.As(err, &apiErr) && apiErr.HTTPStatus >= 400 && apiErr.HTTPStatus < 500 &&
-		apiErr.HTTPStatus != 429
+	return errors.As(err, &apiErr) && apiErr.HTTPStatus == 404
 }

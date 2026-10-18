@@ -18,6 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/roman-16/proton-cli/internal/mcpauth"
 	"github.com/roman-16/proton-cli/internal/mcpserver"
+	"github.com/roman-16/proton-cli/internal/protonlogin"
 )
 
 var version = "dev"
@@ -48,6 +49,7 @@ func run(fs *flag.FlagSet, args []string) error {
 		burst     = fs.Int("burst", 5, "tool calls allowed back to back")
 		behind    = fs.Bool("behind-proxy", false, "with -oauth: take the client address for rate limits from the last X-Forwarded-For entry (only when every request arrives through that proxy)")
 		list      = fs.Bool("list", false, "print the tools and exit")
+		keepAnon  = fs.Bool("keep-anonymous-session", false, "with -oauth: do not revoke the anonymous Proton session a sign-in was opened under once it is approved. An escape hatch, for if approved sign-ins stop working right after they succeed")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -107,7 +109,7 @@ func run(fs *flag.FlagSet, args []string) error {
 		if err != nil {
 			return err
 		}
-		login, err := newLogin()
+		login, err := newLogin(protonlogin.Config{KeepAnonymousSession: *keepAnon})
 		if err != nil {
 			return err
 		}
