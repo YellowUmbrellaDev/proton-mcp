@@ -52,7 +52,8 @@ type Server struct {
 	cfg      Config
 	resource string // Issuer+MCPPath
 	prefix   string // the path of the issuer, "" when it has none
-	origin   string // scheme://host[:port] of the issuer
+	origin   string // scheme://host[:port] of the issuer, as given (for the URLs it builds)
+	browser  string // the issuer's origin as a browser writes it (for comparing with Origin)
 	store    *store
 	limits   *limiter
 	mux      *http.ServeMux
@@ -125,6 +126,7 @@ func New(cfg Config) (*Server, error) {
 		resource: cfg.Issuer + MCPPath,
 		prefix:   strings.TrimSuffix(issuer.EscapedPath(), "/"),
 		origin:   issuer.Scheme + "://" + issuer.Host,
+		browser:  canonicalOrigin(issuer),
 		store:    st,
 		limits:   newLimiter(cfg.RateLimit),
 		st:       loaded,
@@ -430,4 +432,33 @@ func subset(sub, of []string) bool {
 		}
 	}
 	return true
+}
+
+// canonicalOrigin is an origin the way a browser serialises it in the Origin
+// header: scheme and host in lower case, and no port when it is the scheme's
+// default. The issuer is configured by a person and may say HTTPS://Host:443;
+// the browser will send https://host, and only the canonical forms compare equal.
+func canonicalOrigin(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, ":") { // an IPv6 literal keeps its brackets
+		host = "[" + host + "]"
+	}
+	port := u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	return scheme + "://" + host
+}
+
+// sameOrigin says whether an Origin header names this server's own origin.
+func (s *Server) sameOrigin(header string) bool {
+	u, err := url.Parse(header)
+	if err != nil || u.Host == "" || u.Path != "" || u.User != nil {
+		return false // "null" and anything that is not a bare origin
+	}
+	return canonicalOrigin(u) == s.browser
 }

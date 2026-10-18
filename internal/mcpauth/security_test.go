@@ -599,3 +599,37 @@ func TestStateWithoutOptionalCollectionsLoads(t *testing.T) {
 	}
 	s.Unbound["x"] = time.Now() // would panic on a nil map
 }
+
+// The browser writes its Origin canonically: host in lower case and no default
+// port. An issuer configured as HTTPS://Proton.Example:443 must accept what a
+// browser sends for it, and still refuse anything that is another origin.
+func TestOriginIsComparedAsABrowserWritesIt(t *testing.T) {
+	for _, tc := range []struct {
+		issuer, origin string
+		same           bool
+	}{
+		{"https://proton.example", "https://proton.example", true},
+		{"HTTPS://Proton.Example", "https://proton.example", true},
+		{"https://proton.example:443", "https://proton.example", true},
+		{"http://proton.example:80", "http://proton.example", true},
+		{"https://proton.example:8443", "https://proton.example:8443", true},
+		{"https://proton.example:8443", "https://proton.example", false},
+		{"https://proton.example", "http://proton.example", false},
+		{"https://proton.example", "https://proton.example.evil.test", false},
+		{"https://proton.example", "https://evil.test", false},
+		{"https://proton.example", "null", false},
+		{"https://proton.example", "https://proton.example/path", false},
+		{"https://proton.example", "https://user@proton.example", false},
+		{"http://127.0.0.1:8080", "http://127.0.0.1:8080", true},
+		{"http://[::1]:8080", "http://[::1]:8080", true},
+	} {
+		u, err := url.Parse(tc.issuer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := &Server{browser: canonicalOrigin(u)}
+		if got := s.sameOrigin(tc.origin); got != tc.same {
+			t.Errorf("issuer %q, Origin %q: got %v, want %v", tc.issuer, tc.origin, got, tc.same)
+		}
+	}
+}

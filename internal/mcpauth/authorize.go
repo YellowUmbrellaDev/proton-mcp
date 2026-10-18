@@ -366,7 +366,7 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, http.StatusBadRequest, "The form could not be read.", "")
 		return
 	}
-	if o := r.Header.Get("Origin"); o != "" && o != s.origin {
+	if o := r.Header.Get("Origin"); o != "" && !s.sameOrigin(o) {
 		s.errorPage(w, http.StatusForbidden, "The answer did not come from this page.", "")
 		return
 	}
