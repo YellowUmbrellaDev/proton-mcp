@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -42,11 +44,18 @@ type fakeProton struct {
 	revokeCode int
 	sessions   int
 	forks      int
+	// opened lists the anonymous sessions handed out, in order; revokes counts the
+	// DELETEs seen per session id.
+	opened  []string
+	revokes map[string]int
+	// failFork and pullCode make the fork endpoints answer with that status.
+	failFork int
+	pullCode int
 }
 
 func newFake(t *testing.T) *fakeProton {
 	t.Helper()
-	f := &fakeProton{t: t, revokeCode: 200}
+	f := &fakeProton{t: t, revokeCode: 200, revokes: map[string]int{}}
 	f.userKey = lockedKey(t, "user")
 	f.addrKey = lockedKey(t, "address")
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
@@ -84,11 +93,21 @@ func (f *fakeProton) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/auth/v4/sessions" && r.Method == http.MethodPost:
 		f.sessions++
-		f.reply(w, 200, map[string]any{"Code": 1000, "UID": "anon-uid", "AccessToken": "anon-access", "RefreshToken": "anon-refresh"})
+		uid := fmt.Sprintf("anon-%d", f.sessions)
+		f.opened = append(f.opened, uid)
+		f.reply(w, 200, map[string]any{"Code": 1000, "UID": uid, "AccessToken": "anon-access", "RefreshToken": "anon-refresh"})
 	case p == "/auth/v4/sessions/forks" && r.Method == http.MethodGet:
 		f.forks++
+		if f.failFork != 0 {
+			f.reply(w, f.failFork, map[string]any{"Code": 2000, "Error": "no fork for you"})
+			return
+		}
 		f.reply(w, 200, map[string]any{"Code": 1000, "Selector": "selector-1", "UserCode": "ABCD1234"})
 	case p == "/auth/v4/sessions/forks/selector-1":
+		if f.pullCode != 0 {
+			f.reply(w, f.pullCode, map[string]any{"Code": 2000, "Error": "unknown fork"})
+			return
+		}
 		if !f.approved {
 			f.reply(w, 422, map[string]any{"Code": 22000, "Error": "not yet"})
 			return
@@ -119,7 +138,9 @@ func (f *fakeProton) serve(w http.ResponseWriter, r *http.Request) {
 	case p == "/auth/v4/sessions/local/key" && r.Method == http.MethodGet:
 		f.reply(w, 200, map[string]any{"Code": 1000, "ClientKey": base64.StdEncoding.EncodeToString(f.clientKey)})
 	case strings.HasPrefix(p, "/auth/v4/sessions/") && r.Method == http.MethodDelete:
-		f.revoked = append(f.revoked, strings.TrimPrefix(p, "/auth/v4/sessions/"))
+		uid := strings.TrimPrefix(p, "/auth/v4/sessions/")
+		f.revoked = append(f.revoked, uid)
+		f.revokes[uid]++
 		if f.revokeCode != 200 {
 			f.reply(w, f.revokeCode, map[string]any{"Code": 10013, "Error": "session gone"})
 			return
@@ -333,9 +354,7 @@ func TestAnApprovalWithoutKeysFailsAndRevokesTheSession(t *testing.T) {
 	if err != nil || st.State != mcpauth.Failed {
 		t.Fatalf("Check = %+v, %v; want Failed", st, err)
 	}
-	if got := f.revokedUIDs(); len(got) != 1 || got[0] != "child-uid" {
-		t.Errorf("revoked %v, want the issued child session", got)
-	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"child-uid": 1, "anon-1": 1})
 	if _, err := os.Stat(sessionFile(t, "u0123456789abcdef")); !os.IsNotExist(err) {
 		t.Errorf("a locked session was saved: %v", err)
 	}
@@ -531,4 +550,325 @@ func TestDefaultSubjectIsAValidProfileName(t *testing.T) {
 
 func newDebugLogger(w *strings.Builder) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// leaks reports the sessions Proton opened that were never revoked, once the
+// background revokes have finished.
+func (f *fakeProton) leaks(l *Login) []string {
+	l.revokes.Wait()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, uid := range f.opened {
+		if f.revokes[uid] == 0 {
+			out = append(out, uid)
+		}
+	}
+	return out
+}
+
+// revokeCounts is every revoke seen per session id, after the background ones
+// have finished.
+func (f *fakeProton) revokeCounts(l *Login) map[string]int {
+	l.revokes.Wait()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]int{}
+	for k, v := range f.revokes {
+		out[k] = v
+	}
+	return out
+}
+
+func wantRevokes(t *testing.T, got map[string]int, want map[string]int) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("revokes = %v, want %v", got, want)
+		return
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("revokes = %v, want %v", got, want)
+			return
+		}
+	}
+}
+
+func TestAFailedForkRevokesTheSessionItOpenedUnder(t *testing.T) {
+	f := newFake(t)
+	l := newLogin(t, f, newClock())
+	f.failFork = 400
+	if _, err := l.Start(context.Background()); err == nil {
+		t.Fatal("Start succeeded though Proton refused the fork")
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1})
+	if got := len(l.attempts); got != 0 {
+		t.Errorf("%d attempts held after a failed Start", got)
+	}
+}
+
+func TestAMalformedCodeRevokesTheSessionItOpenedUnder(t *testing.T) {
+	f := newFake(t)
+	l := newLogin(t, f, newClock())
+	l.newCode = func(string, string) (fork.Code, error) { return fork.Code{}, errors.New("malformed user code") }
+	if _, err := l.Start(context.Background()); err == nil {
+		t.Fatal("Start succeeded with a code that could not be made")
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1})
+}
+
+func TestTheCapIsCheckedBeforeAnySessionIsOpened(t *testing.T) {
+	f := newFake(t)
+	clk := newClock()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	l, err := New(Config{BaseURL: f.srv.URL, Now: clk.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for i := 0; i < maxAttempts; i++ {
+		if _, err := l.Start(ctx); err != nil {
+			t.Fatalf("Start %d: %v", i, err)
+		}
+	}
+	// Racing past the cap: none of these may open a session.
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := l.Start(ctx); err == nil {
+				t.Error("Start past the cap succeeded")
+			}
+		}()
+	}
+	wg.Wait()
+	f.mu.Lock()
+	opened := len(f.opened)
+	f.mu.Unlock()
+	if opened != maxAttempts {
+		t.Errorf("%d sessions opened, want %d: a refused Start opened one", opened, maxAttempts)
+	}
+	if got := f.revokeCounts(l); len(got) != 0 {
+		t.Errorf("revoked %v while every attempt is live", got)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.leaks(l); len(got) != 0 {
+		t.Errorf("leaked sessions after Close: %v", got)
+	}
+}
+
+func TestAnExpiredAttemptIsRevokedOnceWhenPurged(t *testing.T) {
+	f := newFake(t)
+	clk := newClock()
+	l := newLogin(t, f, clk)
+	ctx := context.Background()
+	a, _ := l.Start(ctx)
+	if got := f.revokeCounts(l); len(got) != 0 {
+		t.Fatalf("revoked %v while the code is valid", got)
+	}
+	clk.advance(9*time.Minute + time.Second)
+	// Nobody polls it: the next Start purges it.
+	if _, err := l.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1})
+
+	// Neither a later poll nor a later purge revokes it again, and the person who
+	// polls learns the code expired.
+	st, err := l.Check(ctx, a.ID)
+	if err != nil || st.State != mcpauth.Failed || st.Message != expiredMessage {
+		t.Errorf("Check = %+v, %v; want Failed: expired", st, err)
+	}
+	clk.advance(retention)
+	if _, err := l.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1, "anon-2": 1})
+}
+
+func TestAnExpiredAttemptIsRevokedWhenPolled(t *testing.T) {
+	f := newFake(t)
+	clk := newClock()
+	l := newLogin(t, f, clk)
+	ctx := context.Background()
+	a, _ := l.Start(ctx)
+	clk.advance(9*time.Minute + time.Second)
+	for i := 0; i < 3; i++ {
+		if st, _ := l.Check(ctx, a.ID); st.State != mcpauth.Failed {
+			t.Fatalf("Check = %+v, want Failed", st)
+		}
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1})
+}
+
+func TestAPermanentErrorOnThePullRevokesTheSession(t *testing.T) {
+	f := newFake(t)
+	l := newLogin(t, f, newClock())
+	ctx := context.Background()
+	a, _ := l.Start(ctx)
+	f.mu.Lock()
+	f.pullCode = 404
+	f.mu.Unlock()
+	for i := 0; i < 2; i++ {
+		if st, err := l.Check(ctx, a.ID); err != nil || st.State != mcpauth.Failed {
+			t.Fatalf("Check = %+v, %v; want Failed", st, err)
+		}
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1})
+}
+
+func TestATransientErrorOnThePullKeepsTheSession(t *testing.T) {
+	f := newFake(t)
+	l := newLogin(t, f, newClock())
+	ctx := context.Background()
+	a, _ := l.Start(ctx)
+	f.mu.Lock()
+	f.pullCode = 429
+	f.mu.Unlock()
+	cctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	if st, err := l.Check(cctx, a.ID); err == nil && st.State == mcpauth.Failed {
+		t.Fatalf("Check = %+v, want the attempt kept", st)
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{})
+}
+
+func TestAnApprovalThatCannotBeFinishedRevokesTheIssuedSessionOnce(t *testing.T) {
+	f := newFake(t)
+	l := newLogin(t, f, newClock())
+	ctx := context.Background()
+	a, _ := l.Start(ctx)
+	code, _ := fork.Parse(a.Code)
+	f.mu.Lock()
+	f.code, f.approved = fork.Code{UserCode: code.UserCode, ClientID: code.ClientID}, true
+	f.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		if st, err := l.Check(ctx, a.ID); err != nil || st.State != mcpauth.Failed {
+			t.Fatalf("Check = %+v, %v; want Failed", st, err)
+		}
+	}
+	// Another purge, and a Close, find the attempt already ended.
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"child-uid": 1, "anon-1": 1})
+}
+
+func TestAnApprovedAttemptIsNeverRevoked(t *testing.T) {
+	f := newFake(t)
+	clk := newClock()
+	l := newLogin(t, f, clk)
+	ctx := context.Background()
+	a, _ := l.Start(ctx)
+	f.approve(a.Code)
+	if st, err := l.Check(ctx, a.ID); err != nil || st.State != mcpauth.Approved {
+		t.Fatalf("Check = %+v, %v; want Approved", st, err)
+	}
+	clk.advance(9*time.Minute + retention + time.Second)
+	if _, err := l.Start(ctx); err != nil { // purges the approved attempt
+		t.Fatalf("Start: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	counts := f.revokeCounts(l)
+	if counts["child-uid"] != 0 {
+		t.Errorf("revoked the subject's session: %v", counts)
+	}
+	if s, err := session.Load(profile.MustParse("u0123456789abcdef")); err != nil || s == nil {
+		t.Errorf("the subject's session is gone: %v, %v", s, err)
+	}
+}
+
+func TestCloseRevokesEveryLiveAttemptAndWaits(t *testing.T) {
+	f := newFake(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	l, err := New(Config{BaseURL: f.srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const n = 5
+	for i := 0; i < n; i++ {
+		if _, err := l.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Close has waited: no further synchronisation before reading the fake.
+	f.mu.Lock()
+	got := map[string]int{}
+	for k, v := range f.revokes {
+		got[k] = v
+	}
+	f.mu.Unlock()
+	want := map[string]int{}
+	for i := 1; i <= n; i++ {
+		want[fmt.Sprintf("anon-%d", i)] = 1
+	}
+	wantRevokes(t, got, want)
+	if err := l.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := l.Start(ctx); err == nil {
+		t.Error("Start after Close succeeded")
+	}
+	wantRevokes(t, f.revokeCounts(l), want)
+}
+
+func TestConcurrentStartCheckAndPurgeNeverRevokeTwice(t *testing.T) {
+	f := newFake(t)
+	clk := newClock()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	l, err := New(Config{BaseURL: f.srv.URL, Now: clk.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a, err := l.Start(ctx)
+			if err != nil {
+				t.Errorf("Start: %v", err)
+				return
+			}
+			var inner sync.WaitGroup
+			for j := 0; j < 3; j++ {
+				inner.Add(1)
+				go func() {
+					defer inner.Done()
+					_, _ = l.Check(ctx, a.ID)
+				}()
+			}
+			clk.advance(10 * time.Second)
+			inner.Wait()
+		}()
+	}
+	wg.Wait()
+	clk.advance(9*time.Minute + time.Second)
+	var closers sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		closers.Add(2)
+		go func() { defer closers.Done(); _, _ = l.Check(ctx, "x"); _, _ = l.Start(ctx) }()
+		go func() { defer closers.Done(); _ = l.Close() }()
+	}
+	closers.Wait()
+	_ = l.Close()
+	counts := f.revokeCounts(l)
+	for uid, c := range counts {
+		if c != 1 {
+			t.Errorf("session %s revoked %d times", uid, c)
+		}
+	}
+	if got := f.leaks(l); len(got) != 0 {
+		t.Errorf("leaked sessions: %v", got)
+	}
 }
