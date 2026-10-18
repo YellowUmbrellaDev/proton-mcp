@@ -37,3 +37,20 @@ func TestEveryToolRegisters(t *testing.T) {
 		t.Fatalf("only %d tools registered", len(tools))
 	}
 }
+
+func TestSendingMailNeedsConfirm(t *testing.T) {
+	tools, _, err := Catalog(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"mail_messages_send": true, "mail_messages_reply": true, "mail_messages_forward": true, "mail_drafts_delete": true, "drive_items_delete": true}
+	for _, tool := range tools {
+		if want[tool.Name] && !tool.Irreversible {
+			t.Errorf("%s runs without confirm", tool.Name)
+		}
+		delete(want, tool.Name)
+	}
+	for n := range want {
+		t.Errorf("tool %s does not exist", n)
+	}
+}

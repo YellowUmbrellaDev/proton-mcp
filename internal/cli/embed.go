@@ -41,3 +41,23 @@ func Run(ctx context.Context, args []string, s app.Streams) (code int, err error
 	}
 	return exitCode(err), err
 }
+
+// Check parses a command line against the command tree without running it: the
+// command must exist, every flag must be one it declares with a value of the
+// right type, and the positionals must be the number it takes. Nothing reaches
+// the network or the disk.
+func Check(args []string) error {
+	args = preprocessArgs(append([]string{"proton"}, args...))[1:]
+	root := newRoot()
+	cmd, rest, err := root.Find(args)
+	if err != nil {
+		return err
+	}
+	if cmd.HasSubCommands() || !cmd.Runnable() {
+		return errors.New(cmd.CommandPath() + " is not a runnable command")
+	}
+	if err := cmd.ParseFlags(rest); err != nil {
+		return err
+	}
+	return cmd.ValidateArgs(cmd.Flags().Args())
+}

@@ -66,6 +66,19 @@ type Tool struct {
 	Download bool
 }
 
+// outward are verbs that reach other people or the public, which cannot be
+// taken back even though the CLI does not call them irreversible. A server must
+// not do them on a first call.
+var outward = map[string]bool{
+	"send": true, "reply": true, "forward": true, "share": true, "invite": true,
+	"transfer": true, "grant": true,
+}
+
+// NeedsConfirm says whether a tool is previewed until the caller passes confirm.
+func (t Tool) NeedsConfirm() bool {
+	return t.Irreversible || (t.Mutating && outward[t.Path[len(t.Path)-1]])
+}
+
 // Options decide which commands become tools.
 type Options struct {
 	// EnableAPI exposes `api`, the raw request escape hatch.
@@ -154,6 +167,9 @@ func build(c *cobra.Command, path []string, enums map[string][]string) (Tool, er
 		Path:         path,
 		Mutating:     kit.Mutating[c.Name()],
 		Irreversible: kit.Irreversible[c.Name()],
+	}
+	if t.NeedsConfirm() {
+		t.Irreversible = true
 	}
 	t.Description = describe(c, path)
 	used := map[string]bool{"dry_run": true, "confirm": true}

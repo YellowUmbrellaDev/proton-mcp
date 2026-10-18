@@ -238,3 +238,40 @@ func TestLiveSweep(t *testing.T) {
 		}
 	}
 }
+
+// TestLiveSend sends one message from the account to itself: the one outward
+// action, held back until confirm, then removed from both folders.
+func TestLiveSend(t *testing.T) {
+	cs := live(t)
+	me, _ := call(t, cs, "account_get", map[string]any{})
+	addr := field(t, me, "email")
+	tag := "proton-mcp-send-" + time.Now().Format("150405")
+	args := map[string]any{"to": []any{addr}, "subject": tag, "body": "prueba de envio"}
+
+	held, isErr := call(t, cs, "mail_messages_send", args)
+	if isErr || !strings.Contains(held, "Nothing was changed") {
+		t.Fatalf("an unconfirmed send must only be previewed: err=%v %.300s", isErr, held)
+	}
+	args["confirm"] = true
+	out, isErr := call(t, cs, "mail_messages_send", args)
+	t.Logf("send err=%v %.120q", isErr, strings.ReplaceAll(out, "\n", " "))
+	if isErr {
+		t.Fatal(out)
+	}
+	var found string
+	for i := 0; i < 12 && found == ""; i++ {
+		time.Sleep(5 * time.Second)
+		list, _ := call(t, cs, "mail_messages_list", map[string]any{"keyword": tag, "limit": 5})
+		var env struct {
+			Messages []struct{ ID, Subject string } `json:"messages"`
+		}
+		_ = json.Unmarshal([]byte(list), &env)
+		if len(env.Messages) > 0 {
+			found = env.Messages[0].ID
+		}
+	}
+	if found == "" {
+		t.Fatalf("the message sent to %s never arrived", addr)
+	}
+	t.Logf("arrived: %d bytes of body", len(func() string { b, _ := call(t, cs, "mail_messages_get", map[string]any{"ref": found}); return b }()))
+}
