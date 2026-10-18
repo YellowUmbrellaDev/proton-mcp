@@ -117,8 +117,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "too many registered clients")
 		return
 	}
-	s.st.Clients[c.ID] = c
-	err := s.commit()
+	err := s.change(func() { s.st.Clients[c.ID] = c })
 	s.mu.Unlock()
 	if err != nil {
 		oauthError(w, http.StatusInternalServerError, "server_error", "")

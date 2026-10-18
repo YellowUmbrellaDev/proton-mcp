@@ -30,7 +30,9 @@ type fakeLogin struct {
 	subject      string
 	checks       map[string]int
 	started      int
-	forgotten    []string
+	forgotten    []string                   // subjects whose Forget succeeded
+	attempts     []string                   // every Forget call
+	onForget     func(subject string) error // when set, runs first; an error fails the call
 }
 
 func newFakeLogin() *fakeLogin {
@@ -57,11 +59,34 @@ func (f *fakeLogin) Check(_ context.Context, id string) (Status, error) {
 	return Status{State: Approved, Subject: f.subject}, nil
 }
 
+// Forget records the subject as forgotten unless onForget, when set, fails it.
+// Every call, successful or not, is counted in attempts.
 func (f *fakeLogin) Forget(_ context.Context, subject string) error {
+	f.mu.Lock()
+	f.attempts = append(f.attempts, subject)
+	hook := f.onForget
+	f.mu.Unlock()
+	if hook != nil {
+		if err := hook(subject); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.forgotten = append(f.forgotten, subject)
 	return nil
+}
+
+func (f *fakeLogin) setOnForget(hook func(subject string) error) {
+	f.mu.Lock()
+	f.onForget = hook
+	f.mu.Unlock()
+}
+
+func (f *fakeLogin) forgetAttempts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.attempts...)
 }
 
 func (f *fakeLogin) forgets() []string {

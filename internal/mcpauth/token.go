@@ -125,6 +125,7 @@ func (s *Server) exchangeCode(form url.Values, clientID string) (map[string]any,
 	case c.Used:
 		// A code used twice was stolen, or the client is broken: whatever it
 		// produced is no longer to be trusted (RFC 6749 §4.1.2).
+		// The revocation stands in memory even if it cannot be written.
 		s.revokeGrant(c.GrantID)
 		delete(s.st.Codes, hash)
 		if err := s.commit(); err != nil {
@@ -148,6 +149,7 @@ func (s *Server) exchangeCode(form url.Values, clientID string) (map[string]any,
 		terr = badRequest("invalid_target", "the code was issued for another resource")
 	}
 	if terr != nil {
+		// Spent even if this cannot be written: the code stays refused.
 		delete(s.st.Codes, hash)
 		s.releaseUnbound(c.Subject)
 		if err := s.commit(); err != nil {
@@ -156,22 +158,26 @@ func (s *Server) exchangeCode(form url.Values, clientID string) (map[string]any,
 		return nil, terr
 	}
 
-	g := &grant{
-		ID:       newID(),
-		ClientID: c.ClientID,
-		Subject:  c.Subject,
-		Scopes:   c.Scopes,
-		Resource: c.Resource,
-		Created:  now,
-		Expires:  now.Add(s.cfg.RefreshTTL),
-	}
-	s.st.Grants[g.ID] = g
-	c.Used, c.GrantID = true, g.ID
-	// Kept until the grant ends, so that a replay can still be caught.
-	c.Expires = g.Expires
-	s.releaseUnbound(c.Subject) // the grant holds the session now
-	resp := s.issue(g, g.Scopes, now)
-	if err := s.commit(); err != nil {
+	// All or nothing: if the state cannot be written, the code stays unused
+	// and no grant or token exists, so the client may simply try again.
+	var resp map[string]any
+	if err := s.change(func() {
+		g := &grant{
+			ID:       newID(),
+			ClientID: c.ClientID,
+			Subject:  c.Subject,
+			Scopes:   c.Scopes,
+			Resource: c.Resource,
+			Created:  now,
+			Expires:  now.Add(s.cfg.RefreshTTL),
+		}
+		s.st.Grants[g.ID] = g
+		c.Used, c.GrantID = true, g.ID
+		// Kept until the grant ends, so that a replay can still be caught.
+		c.Expires = g.Expires
+		s.releaseUnbound(c.Subject) // the grant holds the session now
+		resp = s.issue(g, g.Scopes, now)
+	}); err != nil {
 		return nil, errServer
 	}
 	return resp, nil
@@ -197,7 +203,7 @@ func (s *Server) refresh(form url.Values, clientID string) (map[string]any, *tok
 	g := s.st.Grants[rt.GrantID]
 	switch {
 	case g == nil || now.After(rt.Expires) || now.After(g.Expires):
-		delete(s.st.Refresh, hash)
+		delete(s.st.Refresh, hash) // stands in memory even if not written
 		_ = s.commit()
 		return nil, badRequest("invalid_grant", "the refresh token has expired")
 	case !equal(g.ClientID, clientID):
@@ -214,28 +220,34 @@ func (s *Server) refresh(form url.Values, clientID string) (map[string]any, *tok
 		}
 	}
 
-	switch {
-	case rt.Superseded.IsZero():
-		rt.Superseded = now
-		if keep := now.Add(supersededKeep); keep.Before(rt.Expires) {
-			rt.Expires = keep
-		}
-	case !rt.GraceUsed && now.Sub(rt.Superseded) <= refreshGrace:
-		// The client is racing itself: the answer to its first refresh is
-		// still on the way. Let it through once.
-		rt.GraceUsed = true
-	default:
+	if !rt.Superseded.IsZero() && (rt.GraceUsed || now.Sub(rt.Superseded) > refreshGrace) {
 		// A rotated refresh token came back: one of the two holders is not
-		// the client. End the grant (RFC 9700 §4.14.2).
+		// the client. End the grant (RFC 9700 §4.14.2). The revocation stands
+		// in memory even if it cannot be written.
 		s.revokeGrant(g.ID)
 		if err := s.commit(); err != nil {
 			return nil, errServer
 		}
 		return nil, badRequest("invalid_grant", "the refresh token was already used")
 	}
-	g.Expires = now.Add(s.cfg.RefreshTTL)
-	resp := s.issue(g, scopes, now)
-	if err := s.commit(); err != nil {
+	// All or nothing: if the state cannot be written, the presented token is
+	// not marked used and no new tokens exist, so the client may try again
+	// with the token it holds.
+	var resp map[string]any
+	if err := s.change(func() {
+		if rt.Superseded.IsZero() {
+			rt.Superseded = now
+			if keep := now.Add(supersededKeep); keep.Before(rt.Expires) {
+				rt.Expires = keep
+			}
+		} else {
+			// The client is racing itself: the answer to its first refresh
+			// is still on the way. Let it through once.
+			rt.GraceUsed = true
+		}
+		g.Expires = now.Add(s.cfg.RefreshTTL)
+		resp = s.issue(g, scopes, now)
+	}); err != nil {
 		return nil, errServer
 	}
 	return resp, nil
@@ -290,6 +302,8 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
 	}
 	var err error
 	if g != nil || grantID != "" {
+		// The revocation stands in memory even if it cannot be written; a
+		// retry finds the token gone, which is not an error.
 		if isRefresh {
 			s.revokeGrant(grantID)
 		} else {

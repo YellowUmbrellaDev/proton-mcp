@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -102,6 +104,30 @@ func newState() *state {
 	}
 }
 
+// clone copies the state so that changing the copy's collections or records
+// leaves the original alone. Slices inside a record are never changed in place,
+// so they are shared.
+func (s *state) clone() *state {
+	return &state{
+		Clients: cloneRecords(s.Clients),
+		Grants:  cloneRecords(s.Grants),
+		Codes:   cloneRecords(s.Codes),
+		Access:  cloneRecords(s.Access),
+		Refresh: cloneRecords(s.Refresh),
+		Unbound: maps.Clone(s.Unbound),
+		Forget:  slices.Clone(s.Forget),
+	}
+}
+
+func cloneRecords[T any](m map[string]*T) map[string]*T {
+	out := make(map[string]*T, len(m))
+	for k, v := range m {
+		c := *v
+		out[k] = &c
+	}
+	return out
+}
+
 // The file on disk: a version and the sealed JSON of a state.
 type envelope struct {
 	Version int    `json:"v"`
@@ -117,6 +143,9 @@ const (
 type store struct {
 	path string
 	aead cipher.AEAD
+	// failSave, when set, makes save fail with it without writing; tests use
+	// it to stand for a full or broken disk. Guarded like the state (s.mu).
+	failSave error
 }
 
 func newStore(path string, key []byte) (*store, error) {
@@ -191,6 +220,9 @@ func (st *store) load() (*state, error) {
 // save writes the state atomically: a sealed temporary file next to the real
 // one, synced, then renamed over it.
 func (st *store) save(s *state) error {
+	if st.failSave != nil {
+		return st.failSave
+	}
 	plain, err := json.Marshal(s)
 	if err != nil {
 		return err

@@ -210,6 +210,8 @@ func (s *Server) check(ctx context.Context, p *pending) Status {
 	if st.State == Approved {
 		s.mu.Lock()
 		p.approved = st.Subject
+		// Holding is the safe direction: if this is not written, the
+		// subject is still held in memory and let go (and forgotten) later.
 		s.holdUnbound(st.Subject, p.expires)
 		_ = s.commit()
 		s.mu.Unlock()
@@ -409,20 +411,29 @@ func (s *Server) consent(w http.ResponseWriter, r *http.Request) {
 	}
 	text, hash := newSecret()
 	s.mu.Lock()
-	s.st.Codes[hash] = &authCode{
-		ClientID:    p.clientID,
-		RedirectURI: p.redirectURI,
-		Challenge:   p.challenge,
-		Resource:    p.resource,
-		Scopes:      scopes,
-		Subject:     subject,
-		Expires:     now.Add(s.cfg.CodeTTL),
+	err := s.change(func() {
+		s.st.Codes[hash] = &authCode{
+			ClientID:    p.clientID,
+			RedirectURI: p.redirectURI,
+			Challenge:   p.challenge,
+			Resource:    p.resource,
+			Scopes:      scopes,
+			Subject:     subject,
+			Expires:     now.Add(s.cfg.CodeTTL),
+		}
+		// The session must outlive the code, whenever in the sign-in consent
+		// came.
+		s.holdUnbound(subject, now.Add(s.cfg.CodeTTL+purgeEvery))
+	})
+	if err != nil {
+		// No code exists and the sign-in is over: let the session go, as
+		// on a refusal.
+		s.releaseUnbound(subject)
+		_ = s.commit()
 	}
-	// The session must outlive the code, whenever in the sign-in consent came.
-	s.holdUnbound(subject, now.Add(s.cfg.CodeTTL+purgeEvery))
-	err := s.commit()
 	s.mu.Unlock()
 	if err != nil {
+		s.drainIfQueued()
 		s.redirectError(w, r, p.redirectURI, p.state, "server_error", "")
 		return
 	}

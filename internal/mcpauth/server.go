@@ -62,8 +62,9 @@ type Server struct {
 	pending   map[string]*pending // sign-ins in flight, by id; not persisted
 	lastPurge time.Time
 
-	drainMu sync.Mutex // one round of Login.Forget calls at a time
-	retryAt time.Time  // after a failed Login.Forget, when to try again; guarded by mu
+	drainMu sync.Mutex     // one round of Login.Forget calls at a time
+	startup sync.WaitGroup // the drain New starts; Close waits for it
+	retryAt time.Time      // after a failed Login.Forget, when to try again; guarded by mu
 }
 
 // New builds the server.
@@ -130,6 +131,12 @@ func New(cfg Config) (*Server, error) {
 		pending:  map[string]*pending{},
 	}
 	s.mux = s.routes()
+	if len(loaded.Forget) > 0 {
+		// A previous run stopped before forgetting these; do it now rather
+		// than at the first request. In the background, since Forget may
+		// talk to Proton; Close waits for it.
+		s.startup.Go(s.drainForget)
+	}
 	return s, nil
 }
 
@@ -177,6 +184,7 @@ func (s *Server) ResourceMetadataURL() string {
 // Close releases the state. Everything is already on disk; what is left is to
 // try once more to forget subjects whose last grant is gone.
 func (s *Server) Close() error {
+	s.startup.Wait()
 	s.drainForget()
 	return nil
 }
@@ -185,8 +193,26 @@ func (s *Server) endpoint(path string) string { return s.cfg.Issuer + path }
 
 func (s *Server) now() time.Time { return s.cfg.Now() }
 
-// commit saves the state; the caller holds s.mu.
+// commit saves the state; the caller holds s.mu. A failed commit leaves the
+// change in memory, where the next successful commit writes it too: use it as
+// is only for changes that take something away (a revocation, a spent code),
+// which must hold whether or not they reached the disk.
 func (s *Server) commit() error { return s.store.save(s.st) }
+
+// change applies fn to the state and commits it, all or nothing: if the commit
+// fails, the state is put back exactly as it was before fn. Use it for changes
+// that hand something to a client (a grant, tokens, a code, a registration), so
+// that a failed write never leaves behind a change the client was not told
+// about. The caller holds s.mu.
+func (s *Server) change(fn func()) error {
+	before, retryAt := s.st.clone(), s.retryAt
+	fn()
+	if err := s.commit(); err != nil {
+		s.st, s.retryAt = before, retryAt
+		return err
+	}
+	return nil
+}
 
 // maybePurge sweeps expired state at most once every purgeEvery; the caller
 // holds s.mu. It reports whether anything changed.
@@ -307,41 +333,54 @@ func (s *Server) subjectInUse(subject string) bool {
 }
 
 // drainForget calls Login.Forget for every queued subject that is still unused.
-// It runs outside s.mu, since Forget may talk to Proton; a failure leaves the
-// subject queued for the next round.
+// It runs outside s.mu, since Forget may talk to Proton. A subject leaves the
+// durable queue only once its Forget has succeeded (or it is in use again), so
+// a crash at any point leaves it queued for the next start; Forget is
+// idempotent, so trying it again is safe. A failure keeps the subject queued
+// for the next round.
 func (s *Server) drainForget() {
 	s.drainMu.Lock()
 	defer s.drainMu.Unlock()
 	s.mu.Lock()
-	queue := s.st.Forget
-	s.st.Forget = nil
 	var todo []string
-	for _, subject := range queue {
+	for _, subject := range s.st.Forget {
 		if !s.subjectInUse(subject) {
 			todo = append(todo, subject)
 		}
 	}
-	if len(queue) > 0 {
-		_ = s.commit()
-	}
+	queued := len(s.st.Forget) > 0
 	s.mu.Unlock()
+	if !queued {
+		return
+	}
 
-	var failed []string
+	forgotten := map[string]bool{}
 	for _, subject := range todo {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if err := s.cfg.Login.Forget(ctx, subject); err != nil {
-			failed = append(failed, subject)
+		if err := s.cfg.Login.Forget(ctx, subject); err == nil {
+			forgotten[subject] = true
 		}
 		cancel()
 	}
-	if len(failed) > 0 {
-		s.mu.Lock()
-		for _, subject := range failed {
-			s.queueForget(subject)
-		}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.st.Forget)
+	// Subjects queued while Forget ran were not tried and stay; one in use
+	// again is queued anew when it is let go.
+	s.st.Forget = slices.DeleteFunc(s.st.Forget, func(subject string) bool {
+		return forgotten[subject] || s.subjectInUse(subject)
+	})
+	untried := slices.ContainsFunc(s.st.Forget, func(subject string) bool {
+		return !slices.Contains(todo, subject)
+	})
+	if len(forgotten) < len(todo) && !untried {
 		s.retryAt = s.now().Add(forgetRetry)
+	}
+	if len(s.st.Forget) != n {
+		// If this fails, the disk still lists subjects already forgotten;
+		// they are forgotten again after a restart, which is harmless.
 		_ = s.commit()
-		s.mu.Unlock()
 	}
 }
 
