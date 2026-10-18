@@ -66,12 +66,13 @@ type Tool struct {
 	Download bool
 }
 
-// outward are verbs that reach other people or the public, which cannot be
-// taken back even though the CLI does not call them irreversible. A server must
-// not do them on a first call.
+// outward are verbs that cannot be taken back even though the CLI does not call
+// them irreversible: they reach other people or the public, or (merge) delete
+// the duplicates it folds in, across the whole account and with no way to name
+// which. A server must not do them on a first call.
 var outward = map[string]bool{
 	"send": true, "reply": true, "forward": true, "share": true, "invite": true,
-	"transfer": true, "grant": true,
+	"transfer": true, "grant": true, "merge": true,
 }
 
 // NeedsConfirm says whether a tool is previewed until the caller passes confirm.

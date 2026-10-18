@@ -43,7 +43,7 @@ func TestSendingMailNeedsConfirm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"mail_messages_send": true, "mail_messages_reply": true, "mail_messages_forward": true, "mail_drafts_delete": true, "drive_items_delete": true}
+	want := map[string]bool{"mail_messages_send": true, "mail_messages_reply": true, "mail_messages_forward": true, "mail_drafts_delete": true, "drive_items_delete": true, "contacts_merge": true}
 	for _, tool := range tools {
 		if want[tool.Name] && !tool.Irreversible {
 			t.Errorf("%s runs without confirm", tool.Name)
