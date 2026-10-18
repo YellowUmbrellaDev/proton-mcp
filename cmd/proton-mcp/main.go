@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"flag"
 	"fmt"
 	"log"
@@ -130,6 +131,9 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		if err := checkToken(string(secret)); err != nil {
+			log.Fatalf("--token-file: %v", err)
+		}
 		mux = staticMux(string(secret), streamable(server))
 		log.Printf("proton-mcp %s: %d tools on http://%s", version, len(tools), *addr)
 	default:
@@ -147,10 +151,26 @@ func main() {
 	}
 }
 
+// minTokenBytes is the shortest bearer token the server will accept. A file that
+// is empty, or only whitespace, would otherwise become the header "Bearer " and
+// let in any client that sends it.
+const minTokenBytes = 16
+
+func checkToken(secret string) error {
+	if n := len(trim(secret)); n < minTokenBytes {
+		return fmt.Errorf("the token is %d bytes after trimming, want at least %d (try: openssl rand -base64 32)", n, minTokenBytes)
+	}
+	return nil
+}
+
 func bearer(secret string, next http.Handler) http.Handler {
-	want := "Bearer " + string(trim(secret))
+	token := trim(secret)
+	want := "Bearer " + token
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != want {
+		// An empty secret would make the wanted header "Bearer " and let in every
+		// client that sends it, so with no secret nothing gets in.
+		got := r.Header.Get("Authorization")
+		if token == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
