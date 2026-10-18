@@ -542,19 +542,47 @@ func (a *App) LoginQR(ctx context.Context, show func(code string) error) error {
 	if err != nil {
 		return err
 	}
+	return a.finishFork(ctx, keyPass, approved)
+}
+
+// finishFork is what follows an approval: the session the fork handed over
+// replaces whatever the client held, it is attached to the account it belongs to,
+// and the key password it came with is sealed into it.
+//
+// A code that carried no key signs the machine in and unlocks nothing, which is a
+// session to save as it is: the first command that decrypts asks for the
+// password, exactly as one signed in before this build would.
+func (a *App) finishFork(ctx context.Context, keyPass string, approved *proton.ForkedSession) error {
 	a.API.AdoptSession(approved.UID, approved.AccessToken, approved.RefreshToken)
 	if err := a.attach(ctx); err != nil {
 		return err
 	}
-	// A code that carried no key signs the machine in and unlocks nothing, which
-	// is a session to save as it is: the first command that decrypts asks for the
-	// password, exactly as one signed in before this build would.
 	if keyPass != "" {
 		if err := keys.Seal(ctx, a.API, keyPass); err != nil {
 			return err
 		}
 	}
 	return a.settle(ctx)
+}
+
+// AdoptFork finishes a sign-in by code for a caller that is not a command: c is
+// the client that opened the fork, approved is what the fork handed over and
+// keyPass is what code.Open recovered from it. The session is saved under name,
+// unlocked, and the account's address is returned.
+//
+// It is the same finishing LoginQR does, on a client of the caller's own, so a
+// server that signs several people in at once does not need an App - nor the
+// process-wide state building one sets - for each of them. Nothing here can ask a
+// question: a key password that does not open the keys is an error.
+func AdoptFork(ctx context.Context, c *proton.Client, name profile.Name, keyPass string, approved *proton.ForkedSession) (string, error) {
+	u := ui.New(ui.Options{Out: io.Discard, Err: io.Discard, In: strings.NewReader(""), NoInput: true})
+	a := &App{Profile: name, API: c, UI: u, Creds: newCredentials(u, "")}
+	a.Account = account.New(c, a.Unlock)
+	c.SetPersistHook(func() { _ = a.saveSession() })
+	if err := a.finishFork(ctx, keyPass, approved); err != nil {
+		return "", err
+	}
+	return a.email, nil
 }
 
 // AccessInto signs the profile named by target in to the account this one holds
