@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
 )
 
 // TestLiveDrive exercises the Drive tools inside one folder of its own and

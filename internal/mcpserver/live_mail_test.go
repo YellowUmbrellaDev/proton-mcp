@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
 )
 
 type mailRow struct {
