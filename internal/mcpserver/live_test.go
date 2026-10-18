@@ -30,6 +30,15 @@ func live(t *testing.T) *mcp.ClientSession {
 		}
 		cfg.Record = log.Record
 	}
+	// PROTON_MCP_PACE=<duration> (for example 20s) spaces every call, so a long
+	// run is spread over time instead of hitting the account in a burst.
+	if pace := os.Getenv("PROTON_MCP_PACE"); pace != "" {
+		gap, err := time.ParseDuration(pace)
+		if err != nil {
+			t.Fatalf("PROTON_MCP_PACE: %v", err)
+		}
+		cfg.Limiter = NewPacer(gap)
+	}
 	srv, _, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)

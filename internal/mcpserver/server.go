@@ -17,6 +17,8 @@ type Config struct {
 	// Allow decides whether the caller may use a tool, for scopes. Nil allows
 	// everything.
 	Allow func(ctx context.Context, t Tool) error
+	// Limiter, if set, spaces the calls. A call waits its turn rather than failing.
+	Limiter *Limiter
 	// Record is told the outcome of every call. It is how coverage is measured:
 	// which tools have really run, against a real account, and which only exist.
 	Record func(t Tool, r Result)
@@ -51,6 +53,9 @@ func New(c Config) (*mcp.Server, []Tool, error) {
 			}
 			in, err := DecodeInput(req.Params.Arguments)
 			if err != nil {
+				return textResult(err.Error(), true), nil
+			}
+			if err := c.Limiter.Wait(ctx); err != nil {
 				return textResult(err.Error(), true), nil
 			}
 			run, err := c.Runner(ctx)

@@ -26,6 +26,8 @@ func main() {
 		enableAPI = flag.Bool("enable-api", false, "expose the raw `api` command")
 		confirm   = flag.String("confirm", "", "confirmation policy handed to every command")
 		zone      = flag.String("zone", "UTC", "IANA time zone commands work in")
+		perMinute = flag.Float64("max-calls-per-minute", 30, "average tool calls a minute (0 for no limit)")
+		burst     = flag.Int("burst", 5, "tool calls allowed back to back")
 		list      = flag.Bool("list", false, "print the tools and exit")
 	)
 	flag.Parse()
@@ -48,6 +50,7 @@ func main() {
 		Version: version,
 		Options: opts,
 		Runner:  func(context.Context) (mcpserver.Runner, error) { return runner, nil },
+		Limiter: mcpserver.NewLimiter(*perMinute, *burst),
 	})
 	if err != nil {
 		log.Fatal(err)
