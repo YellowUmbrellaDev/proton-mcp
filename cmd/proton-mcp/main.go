@@ -34,6 +34,7 @@ func main() {
 		zone      = flag.String("zone", "UTC", "IANA time zone commands work in")
 		perMinute = flag.Float64("max-calls-per-minute", 30, "average tool calls a minute (0 for no limit)")
 		burst     = flag.Int("burst", 5, "tool calls allowed back to back")
+		behind    = flag.Bool("behind-proxy", false, "with -oauth: take the client address for rate limits from the last X-Forwarded-For entry (only when every request arrives through that proxy)")
 		list      = flag.Bool("list", false, "print the tools and exit")
 	)
 	flag.Parse()
@@ -78,6 +79,10 @@ func main() {
 		Limiter: mcpserver.NewLimiter(*perMinute, *burst),
 	}
 	var authSrv *mcpauth.Server
+	var clientIP func(*http.Request) string
+	if *behind {
+		clientIP = forwardedClientIP
+	}
 	if *oauth {
 		base, err := parseIssuer(*issuer)
 		if err != nil {
@@ -92,7 +97,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		authSrv, err = mcpauth.New(mcpauth.Config{Issuer: base, StatePath: *state, Key: key, Login: login})
+		authSrv, err = mcpauth.New(mcpauth.Config{Issuer: base, StatePath: *state, Key: key, Login: login, ClientIP: clientIP})
 		if err != nil {
 			log.Fatal(err)
 		}

@@ -1,10 +1,12 @@
 package mcpauth
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -574,4 +576,26 @@ func TestNoSecretsInLoginURLs(t *testing.T) {
 	if len(ck) != 1 || strings.Contains(loc, ck[0].Value) {
 		t.Fatalf("CSRF token leaked into the login URL %q", loc)
 	}
+}
+
+// A state file with no "forget" or "unbound" keys (an empty document, or one
+// written by an earlier build) must load into usable collections: a nil map
+// panics on the first write.
+func TestStateWithoutOptionalCollectionsLoads(t *testing.T) {
+	key := bytes.Repeat([]byte{9}, 32)
+	st, err := newStore(filepath.Join(t.TempDir(), "state.json"), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.save(&state{}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := st.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Unbound == nil || s.Clients == nil || s.Grants == nil {
+		t.Fatalf("a collection is nil after load: %+v", s)
+	}
+	s.Unbound["x"] = time.Now() // would panic on a nil map
 }

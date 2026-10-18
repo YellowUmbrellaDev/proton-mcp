@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -82,12 +84,41 @@ func get(h http.Handler, path string, header ...string) *httptest.ResponseRecord
 	return rec
 }
 
+// noLogin is a Login that never signs anybody in: these tests only look at what
+// the mux lets through, not at the sign-in.
+type noLogin struct{}
+
+func (noLogin) Start(context.Context) (mcpauth.Attempt, error) {
+	return mcpauth.Attempt{}, errors.New("no sign-in in this test")
+}
+func (noLogin) Check(context.Context, string) (mcpauth.Status, error) {
+	return mcpauth.Status{State: mcpauth.Failed, Message: "no sign-in in this test"}, nil
+}
+func (noLogin) Forget(context.Context, string) error { return nil }
+
+// authServer builds a real authorization server over a temp state file.
+func authServer(t *testing.T) *mcpauth.Server {
+	t.Helper()
+	as, err := mcpauth.New(mcpauth.Config{
+		Issuer:    "https://proton-mcp.example.com",
+		StatePath: filepath.Join(t.TempDir(), "state.json"),
+		Key:       bytes.Repeat([]byte{7}, 32),
+		Login:     noLogin{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = as.Close() })
+	return as
+}
+
 var reached = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("mcp")) })
 
 func TestHealthzNeedsNoToken(t *testing.T) {
+	as := authServer(t)
 	for name, h := range map[string]http.Handler{
 		"static": staticMux("secret", reached),
-		"oauth":  oauthMux(&mcpauth.Server{}, reached),
+		"oauth":  oauthMux(as, reached),
 	} {
 		rec := get(h, "/healthz")
 		if rec.Code != 200 || rec.Body.String() != "ok" {
@@ -108,7 +139,7 @@ func TestStaticModeNeedsTheToken(t *testing.T) {
 
 // The MCP endpoint is closed to anything the authorization server did not issue.
 func TestOAuthModeClosesTheMCPPath(t *testing.T) {
-	h := oauthMux(&mcpauth.Server{}, reached)
+	h := oauthMux(authServer(t), reached)
 	for _, hdr := range [][]string{nil, {"Authorization", "Bearer guess"}} {
 		rec := get(h, mcpauth.MCPPath, hdr...)
 		if rec.Code != http.StatusUnauthorized || rec.Body.String() == "mcp" {

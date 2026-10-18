@@ -30,10 +30,10 @@ type state struct {
 	// yet (consent pending, or a code not exchanged), with the time after which
 	// they are given up on. It outlives a restart, so such a session is
 	// forgotten even if the server stops in between.
-	Unbound map[string]time.Time `json:"unbound,omitempty"`
+	Unbound map[string]time.Time `json:"unbound"`
 	// Forget lists subjects whose last grant is gone but whose Login.Forget has
 	// not succeeded yet; it is retried until it does.
-	Forget []string `json:"forget,omitempty"`
+	Forget []string `json:"forget"`
 }
 
 // A registered client (RFC 7591). Every client is public: it proves itself

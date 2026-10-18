@@ -3,8 +3,8 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,16 +13,32 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/roman-16/proton-cli/internal/mcpauth"
+	"github.com/roman-16/proton-cli/internal/protonlogin"
 )
 
 // newLogin builds the sign-in the authorization server sends people through: the
 // Proton "sign in with another device" flow.
-//
-// TODO: replace the body with the real constructor once internal/protonlogin
-// lands: return protonlogin.New(protonlogin.Config{...}). Until then OAuth mode
-// refuses to start rather than run without a way to sign in.
 var newLogin = func() (mcpauth.Login, error) {
-	return nil, errors.New("the Proton login is not built into this binary yet")
+	return protonlogin.New(protonlogin.Config{})
+}
+
+// forwardedClientIP names the client of a request for the rate limit when the
+// server sits behind a reverse proxy that writes X-Forwarded-For. It takes the
+// last entry, the one the proxy itself appended: the earlier ones are whatever
+// the caller sent. Only use it when every request really arrives through that
+// proxy, otherwise a caller can pick its own address.
+func forwardedClientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		if ip := strings.TrimSpace(parts[len(parts)-1]); ip != "" {
+			return ip
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // loadKey reads the key that seals what the authorization server keeps at rest.
