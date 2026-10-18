@@ -24,6 +24,7 @@
 | `-zone` | IANA zone every command works in, default `UTC` |
 | `-confirm` | confirmation policy handed to every command |
 | `-enable-api` | expose the raw `api` command |
+| `-keep-anonymous-session` | with `-oauth`: keep the anonymous Proton session a sign-in is opened under once the sign-in is approved, instead of revoking it. Off by default. An escape hatch: if approved sign-ins stop working right after they succeed (the server logs a warning naming this flag), Proton may be ending the new session along with the anonymous one |
 | `-max-calls-per-minute`, `-burst` | tool-call rate limit, default 30 a minute with a burst of 5 (0 disables it) |
 | `-list` | print the tools and exit |
 

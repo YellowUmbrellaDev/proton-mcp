@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -51,7 +52,16 @@ type fakeProton struct {
 	// failFork and pullCode make the fork endpoints answer with that status.
 	failFork int
 	pullCode int
+	// forkDiesWithParent plays a Proton that ends the forked session when the
+	// anonymous one it was forked from is revoked; childDead records that it did.
+	forkDiesWithParent bool
+	childDead          bool
+	// onRevoke, when set, sees every revoke as it arrives, under mu.
+	onRevoke func(uid string)
 }
+
+// dropConnection, as revokeCode, makes a revoke get no answer at all.
+const dropConnection = -1
 
 func newFake(t *testing.T) *fakeProton {
 	t.Helper()
@@ -120,6 +130,11 @@ func (f *fakeProton) serve(w http.ResponseWriter, r *http.Request) {
 			"Code": 1000, "UID": "child-uid", "AccessToken": "child-access",
 			"RefreshToken": "child-refresh", "Payload": payload,
 		})
+	case f.childDead && r.Header.Get("x-pm-uid") == "child-uid" && p != "/auth/v4/refresh":
+		f.reply(w, 401, map[string]any{})
+	case p == "/auth/v4/refresh" && r.Method == http.MethodPost:
+		// Nothing in these tests refreshes a live session.
+		f.reply(w, 400, map[string]any{"Code": 10013, "Error": "invalid refresh token"})
 	case p == "/core/v4/users":
 		f.reply(w, 200, map[string]any{"Code": 1000, "User": map[string]any{
 			"ID": "user-id", "Name": "someone", "Email": "someone@proton.me",
@@ -141,8 +156,30 @@ func (f *fakeProton) serve(w http.ResponseWriter, r *http.Request) {
 		uid := strings.TrimPrefix(p, "/auth/v4/sessions/")
 		f.revoked = append(f.revoked, uid)
 		f.revokes[uid]++
-		if f.revokeCode != 200 {
-			f.reply(w, f.revokeCode, map[string]any{"Code": 10013, "Error": "session gone"})
+		if f.onRevoke != nil {
+			f.onRevoke(uid)
+		}
+		if f.forkDiesWithParent && strings.HasPrefix(uid, "anon-") {
+			f.childDead = true
+		}
+		if f.revokeCode == dropConnection {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				f.t.Errorf("hijack: %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		switch f.revokeCode {
+		case 200:
+		case 401:
+			// What Proton answers a token it no longer accepts; the refresh that
+			// follows is refused too, so the client reports ErrUnauthorized.
+			f.reply(w, 401, map[string]any{"Code": 401, "Error": "Invalid access token"})
+			return
+		default:
+			f.reply(w, f.revokeCode, map[string]any{"Code": 2000, "Error": "refused"})
 			return
 		}
 		f.reply(w, 200, map[string]any{"Code": 1000})
@@ -276,9 +313,7 @@ func TestCheckIsWaitingThenApprovedAndSavesAnUnlockedSession(t *testing.T) {
 	if err != nil || got != keyPassword {
 		t.Errorf("sealed key password = %q, %v; want the one the approval carried", got, err)
 	}
-	if len(f.revokedUIDs()) != 0 {
-		t.Errorf("revoked %v on a good login", f.revokedUIDs())
-	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1})
 }
 
 func TestCheckAfterApprovalIsIdempotent(t *testing.T) {
@@ -362,15 +397,16 @@ func TestAnApprovalWithoutKeysFailsAndRevokesTheSession(t *testing.T) {
 
 func TestStatusAndLogsNeverCarrySecrets(t *testing.T) {
 	f := newFake(t)
-	var logs strings.Builder
+	var logs syncBuilder
 	l := newLogin(t, f, newClock())
 	l.cfg.Logger = newDebugLogger(&logs)
 	ctx := context.Background()
 	a, _ := l.Start(ctx)
 	f.approve(a.Code)
 	st, _ := l.Check(ctx, a.ID)
+	l.revokes.Wait()
 	code, _ := fork.Parse(a.Code)
-	for _, secret := range []string{keyPassword, "child-access", "child-refresh", base64.StdEncoding.EncodeToString(code.Key)} {
+	for _, secret := range []string{keyPassword, "child-access", "child-refresh", "anon-access", "anon-refresh", base64.StdEncoding.EncodeToString(code.Key)} {
 		if strings.Contains(logs.String(), secret) || strings.Contains(st.Message, secret) {
 			t.Errorf("a secret leaked into the logs or the status")
 		}
@@ -400,12 +436,11 @@ func TestForgetRevokesOnceAndDeletesEverything(t *testing.T) {
 		}
 	}
 
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1})
 	if err := l.Forget(ctx, st.Subject); err != nil {
 		t.Fatalf("Forget: %v", err)
 	}
-	if got := f.revokedUIDs(); len(got) != 1 || got[0] != "child-uid" {
-		t.Errorf("revoked %v, want exactly the subject's session once", got)
-	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1, "child-uid": 1})
 	if s, err := session.Load(name); err != nil || s != nil {
 		t.Errorf("session after Forget = %v, %v", s, err)
 	}
@@ -418,48 +453,161 @@ func TestForgetRevokesOnceAndDeletesEverything(t *testing.T) {
 	if err := l.Forget(ctx, st.Subject); err != nil {
 		t.Errorf("second Forget: %v", err)
 	}
-	if got := f.revokedUIDs(); len(got) != 1 {
-		t.Errorf("the second Forget revoked again: %v", got)
-	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1, "child-uid": 1})
 	if err := l.Forget(ctx, "ueeeeeeeeeeeeeeee"); err != nil {
 		t.Errorf("Forget of an unknown subject: %v", err)
 	}
 }
 
-func TestForgetToleratesASessionProtonAlreadyRevoked(t *testing.T) {
-	f := newFake(t)
-	l := newLogin(t, f, newClock())
+// signedIn runs one approved sign-in and returns its subject, once the revoke of
+// the anonymous session it was opened under is over.
+func signedIn(t *testing.T, f *fakeProton, l *Login) string {
+	t.Helper()
 	ctx := context.Background()
-	a, _ := l.Start(ctx)
-	f.approve(a.Code)
-	st, _ := l.Check(ctx, a.ID)
-	f.mu.Lock()
-	f.revokeCode = 422
-	f.mu.Unlock()
-	if err := l.Forget(ctx, st.Subject); err != nil {
-		t.Fatalf("Forget: %v", err)
+	a, err := l.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
 	}
-	if s, _ := session.Load(profile.MustParse(st.Subject)); s != nil {
-		t.Error("the session survived")
+	f.approve(a.Code)
+	st, err := l.Check(ctx, a.ID)
+	if err != nil || st.State != mcpauth.Approved {
+		t.Fatalf("Check = %+v, %v; want Approved", st, err)
+	}
+	l.revokes.Wait()
+	return st.Subject
+}
+
+func (f *fakeProton) setRevokeCode(code int) {
+	f.mu.Lock()
+	f.revokeCode = code
+	f.mu.Unlock()
+}
+
+// Only an answer that says the session no longer exists lets Forget delete what
+// would be needed to revoke it later.
+func TestForgetDeletesTheFilesOnlyWhenTheSessionIsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		gone bool
+	}{
+		{"401: refused and not refreshable", 401, true},
+		{"404", 404, true},
+		{"400", 400, false},
+		{"403", 403, false},
+		{"409", 409, false},
+		{"422", 422, false},
+		{"500", 500, false},
+		{"503", 503, false},
+		{"no answer", dropConnection, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake(t)
+			l := newLogin(t, f, newClock())
+			ctx := context.Background()
+			subject := signedIn(t, f, l)
+			name := profile.MustParse(subject)
+			f.setRevokeCode(tc.code)
+
+			err := l.Forget(ctx, subject)
+			s, _ := session.Load(name)
+			if tc.gone {
+				if err != nil || s != nil {
+					t.Fatalf("Forget = %v, session kept = %v; want the files deleted", err, s != nil)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Forget succeeded though the session was not revoked")
+			}
+			if s == nil {
+				t.Fatal("the session was deleted, so the revoke can never be retried")
+			}
+
+			// Proton recovers: the retry revokes it and deletes the files.
+			f.setRevokeCode(200)
+			if err := l.Forget(ctx, subject); err != nil {
+				t.Fatalf("retried Forget: %v", err)
+			}
+			if s, _ := session.Load(name); s != nil {
+				t.Error("the session survived a Forget that revoked it")
+			}
+			if got := f.revokeCounts(l)["child-uid"]; got != 2 {
+				t.Errorf("the subject's session was revoked %d times, want 2", got)
+			}
+			// And a Forget of a subject that is no longer there asks Proton nothing.
+			if err := l.Forget(ctx, subject); err != nil {
+				t.Errorf("Forget after the files are gone: %v", err)
+			}
+			if got := f.revokeCounts(l)["child-uid"]; got != 2 {
+				t.Errorf("a Forget of a forgotten subject revoked again (%d)", got)
+			}
+		})
 	}
 }
 
-func TestForgetKeepsTheSessionWhenProtonCannotBeReached(t *testing.T) {
+// A revoke that keeps failing is retried for ever, since the files are the only
+// way to revoke later, and the operator is told to step in every
+// forgetWarnEvery failures in a row.
+func TestForgetWarnsWhenTheRevokeKeepsFailing(t *testing.T) {
 	f := newFake(t)
+	var logs syncBuilder
 	l := newLogin(t, f, newClock())
+	l.cfg.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	ctx := context.Background()
-	a, _ := l.Start(ctx)
-	f.approve(a.Code)
-	st, _ := l.Check(ctx, a.ID)
-	f.mu.Lock()
-	f.revokeCode = 503
-	f.mu.Unlock()
-	if err := l.Forget(ctx, st.Subject); err == nil {
-		t.Fatal("Forget succeeded though the revoke failed")
+	subject := signedIn(t, f, l)
+	f.setRevokeCode(403)
+
+	for i := 1; i < forgetWarnEvery; i++ {
+		if err := l.Forget(ctx, subject); err == nil {
+			t.Fatal("Forget succeeded")
+		}
 	}
-	if s, _ := session.Load(profile.MustParse(st.Subject)); s == nil {
-		t.Error("the session was deleted, so the revoke can never be retried")
+	if got := logs.String(); got != "" {
+		t.Fatalf("warned before %d failures: %s", forgetWarnEvery, got)
 	}
+	if err := l.Forget(ctx, subject); err == nil {
+		t.Fatal("Forget succeeded")
+	}
+	got := logs.String()
+	if strings.Count(got, "level=WARN") != 1 || !strings.Contains(got, "revoke it by hand") || !strings.Contains(got, subject) {
+		t.Errorf("after %d failures the log is %q, want one warning naming the subject", forgetWarnEvery, got)
+	}
+	for _, secret := range []string{"child-access", "child-refresh", "child-uid"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("the warning carries %q", secret)
+		}
+	}
+	if s, _ := session.Load(profile.MustParse(subject)); s == nil {
+		t.Fatal("the session files were deleted after repeated failures")
+	}
+
+	// Success resets the count and removes the files.
+	f.setRevokeCode(200)
+	if err := l.Forget(ctx, subject); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	if n := len(l.forgetFailures); n != 0 {
+		t.Errorf("%d subjects still counted after a successful Forget", n)
+	}
+}
+
+// syncBuilder is a strings.Builder the background revokes may log to.
+type syncBuilder struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuilder) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuilder) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func TestForgetRefusesTheDefaultProfile(t *testing.T) {
@@ -548,7 +696,7 @@ func TestDefaultSubjectIsAValidProfileName(t *testing.T) {
 	}
 }
 
-func newDebugLogger(w *strings.Builder) *slog.Logger {
+func newDebugLogger(w io.Writer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
@@ -774,10 +922,9 @@ func TestAnApprovedAttemptIsNeverRevoked(t *testing.T) {
 	if err := l.Close(); err != nil {
 		t.Fatal(err)
 	}
-	counts := f.revokeCounts(l)
-	if counts["child-uid"] != 0 {
-		t.Errorf("revoked the subject's session: %v", counts)
-	}
+	// The second Start opened anon-2, which Close revokes. anon-1 is revoked once,
+	// on approval, and neither the purge nor Close revokes it again.
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1, "anon-2": 1})
 	if s, err := session.Load(profile.MustParse("u0123456789abcdef")); err != nil || s == nil {
 		t.Errorf("the subject's session is gone: %v, %v", s, err)
 	}
@@ -870,5 +1017,89 @@ func TestConcurrentStartCheckAndPurgeNeverRevokeTwice(t *testing.T) {
 	}
 	if got := f.leaks(l); len(got) != 0 {
 		t.Errorf("leaked sessions: %v", got)
+	}
+}
+
+// The anonymous session an approved sign-in was opened under is nobody's: it is
+// revoked once, after the subject's session is saved, and the subject's session
+// is never touched.
+func TestAnApprovedSignInRevokesItsAnonymousSessionOnceAfterSaving(t *testing.T) {
+	f := newFake(t)
+	l := newLogin(t, f, newClock())
+	var savedFirst atomic.Bool
+	f.onRevoke = func(uid string) {
+		if uid != "anon-1" {
+			return
+		}
+		s, err := session.Load(profile.MustParse("u0123456789abcdef"))
+		savedFirst.Store(err == nil && s != nil && s.Unlocked() && s.UID == "child-uid")
+	}
+	ctx := context.Background()
+	a, _ := l.Start(ctx)
+	f.approve(a.Code)
+	if st, err := l.Check(ctx, a.ID); err != nil || st.State != mcpauth.Approved {
+		t.Fatalf("Check = %+v, %v; want Approved", st, err)
+	}
+	for i := 0; i < 3; i++ {
+		_, _ = l.Check(ctx, a.ID)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1})
+	if !savedFirst.Load() {
+		t.Error("the anonymous session was revoked before the subject's session was saved")
+	}
+	if s, err := session.Load(profile.MustParse("u0123456789abcdef")); err != nil || s == nil || s.UID != "child-uid" {
+		t.Errorf("the subject's session after the revoke = %v, %v", s, err)
+	}
+}
+
+func TestKeepAnonymousSessionRevokesNothingOnApproval(t *testing.T) {
+	f := newFake(t)
+	l := newLogin(t, f, newClock())
+	l.cfg.KeepAnonymousSession = true
+	signedIn(t, f, l)
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantRevokes(t, f.revokeCounts(l), map[string]int{})
+
+	// Every other end still revokes it.
+	f2 := newFake(t)
+	l2 := newLogin(t, f2, newClock())
+	l2.cfg.KeepAnonymousSession = true
+	if _, err := l2.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := l2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantRevokes(t, f2.revokeCounts(l2), map[string]int{"anon-1": 1})
+}
+
+// If Proton ends the forked session with its parent, the server says so and
+// names the flag that avoids it. It does not try to undo anything.
+func TestARevokeThatEndsTheNewSessionIsReported(t *testing.T) {
+	for _, dies := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fork dies with parent: %v", dies), func(t *testing.T) {
+			f := newFake(t)
+			f.forkDiesWithParent = dies
+			var logs syncBuilder
+			l := newLogin(t, f, newClock())
+			l.cfg.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			subject := signedIn(t, f, l)
+			got := logs.String()
+			warned := strings.Contains(got, "-keep-anonymous-session") && strings.Contains(got, subject)
+			if warned != dies {
+				t.Errorf("warned = %v, want %v; log: %q", warned, dies, got)
+			}
+			for _, secret := range []string{"child-access", "child-refresh", "anon-access", "anon-refresh", keyPassword} {
+				if strings.Contains(got, secret) {
+					t.Errorf("the log carries %q", secret)
+				}
+			}
+			wantRevokes(t, f.revokeCounts(l), map[string]int{"anon-1": 1})
+		})
 	}
 }

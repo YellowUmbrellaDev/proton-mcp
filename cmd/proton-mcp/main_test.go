@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/roman-16/proton-cli/internal/mcpauth"
+	"github.com/roman-16/proton-cli/internal/protonlogin"
 )
 
 func keyFile(t *testing.T, content string) string {
@@ -165,6 +166,34 @@ func TestRunReturnsAnErrorInsteadOfExiting(t *testing.T) {
 		fs := flag.NewFlagSet("t", flag.ContinueOnError)
 		if err := run(fs, args); err == nil {
 			t.Errorf("%s: no error", name)
+		}
+	}
+}
+
+// -keep-anonymous-session reaches the sign-in, and is off unless given.
+func TestKeepAnonymousSessionReachesTheLogin(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "key")
+	if err := os.WriteFile(key, []byte(strings.Repeat("k", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("stop here")
+	defer func(orig func(protonlogin.Config) (mcpauth.Login, error)) { newLogin = orig }(newLogin)
+	for _, keep := range []bool{false, true} {
+		var got *protonlogin.Config
+		newLogin = func(cfg protonlogin.Config) (mcpauth.Login, error) {
+			got = &cfg
+			return nil, stop
+		}
+		args := []string{"-oauth", "-issuer", "https://x.example", "-state", filepath.Join(dir, "state"), "-key-file", key}
+		if keep {
+			args = append(args, "-keep-anonymous-session")
+		}
+		if err := run(flag.NewFlagSet("t", flag.ContinueOnError), args); !errors.Is(err, stop) {
+			t.Fatalf("run = %v, want it to reach the login", err)
+		}
+		if got == nil || got.KeepAnonymousSession != keep {
+			t.Errorf("with the flag %v the login got %+v", keep, got)
 		}
 	}
 }
