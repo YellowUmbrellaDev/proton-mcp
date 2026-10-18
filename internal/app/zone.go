@@ -70,14 +70,28 @@ func (a *App) Location(ctx context.Context) (*time.Location, error) {
 //
 // It is the same thing TZ does, for the same reason, and --zone is that setting
 // for one run.
+//
+// time.Local is a process global that the standard library reads without a lock,
+// and a server runs many invocations in one process. Writers are therefore
+// serialised here, and a run that names the zone already adopted writes nothing,
+// which is every run of a server that pins one zone. The first write of a
+// process still cannot be made safe against unrelated readers, so such a server
+// adopts its zone once at startup, before it serves anything.
 func adoptZone(name string) {
 	if name == "" {
+		return
+	}
+	adoptMu.Lock()
+	defer adoptMu.Unlock()
+	if time.Local.String() == name {
 		return
 	}
 	if loc, err := time.LoadLocation(name); err == nil {
 		time.Local = loc
 	}
 }
+
+var adoptMu sync.Mutex
 
 // zoneCache holds the answer for the invocation, so the account is asked at most
 // once however many times a command needs the zone.

@@ -91,7 +91,11 @@ func (g *globalFlags) settings(pf *pflag.FlagSet) config.Flags {
 // Building the tree rather than mutating a package variable is what lets the
 // conformance test walk a complete, freshly constructed tree and check the rules
 // the interface is meant to obey.
-func newRoot() *cobra.Command {
+func newRoot() *cobra.Command { return newRootIO(app.Streams{}) }
+
+// newRootIO is newRoot with the run's streams replaced, which is what lets one
+// process run commands for several callers without sharing a terminal.
+func newRootIO(streams app.Streams) *cobra.Command {
 	var g globalFlags
 
 	root := &cobra.Command{
@@ -186,6 +190,7 @@ func newRoot() *cobra.Command {
 		}
 		a, err := app.New(app.Options{
 			Resolved: settings,
+			Streams:  streams,
 			APIURL:   g.apiURL,
 			Version:  version,
 			DryRun:   g.dryRun,

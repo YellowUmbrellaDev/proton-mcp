@@ -180,6 +180,10 @@ func mailboxUpdateCmd(noun string, folder bool) *cobra.Command {
 			if name == "" && !color.Set() && parent == "" && !c.Changed("notify") {
 				return kit.Fail("Nothing to change.").Hint(hintFor(folder))
 			}
+			target, err := mailboxes(c, noun, folder).Find(c.Ctx, c.Args[0])
+			if err != nil {
+				return err
+			}
 			spec := mailsvc.LabelSpec{Name: name, Color: color.Value()}
 			if c.Changed("notify") {
 				spec.Notify = &notify
@@ -193,9 +197,9 @@ func mailboxUpdateCmd(noun string, folder bool) *cobra.Command {
 			}
 			return kit.Mutate(c, ui.ResultSpec{
 				Action: ui.Updated, Kind: noun, Count: 1, Name: name,
-				IDs: []string{c.Args[0]},
+				IDs: []string{target.ID},
 			}, func() error {
-				return c.App.Mail.LabelUpdate(c.Ctx, c.Args[0], spec)
+				return c.App.Mail.LabelUpdate(c.Ctx, target.ID, spec)
 			})
 		}),
 	}

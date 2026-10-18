@@ -100,11 +100,22 @@ type App struct {
 // advance, and a verification already solved.
 type Options struct {
 	config.Resolved
+	// Streams redirects what the run reads and writes. The zero value is the
+	// process's own streams.
+	Streams  Streams
 	APIURL   string
 	Version  string
 	DryRun   bool
 	Yes      bool
 	Verified string
+}
+
+// Streams are the three channels a run talks through. A nil member means the
+// process stream of the same name, so an embedder overrides only what it needs.
+type Streams struct {
+	Out io.Writer
+	Err io.Writer
+	In  io.Reader
 }
 
 func New(opts Options) (*App, error) {
@@ -122,6 +133,9 @@ func New(opts Options) (*App, error) {
 	}
 	u := ui.New(ui.Options{
 		Format:   opts.Output,
+		Out:      opts.Streams.Out,
+		Err:      opts.Streams.Err,
+		In:       opts.Streams.In,
 		LogLevel: opts.LogLevel,
 		Quiet:    opts.Quiet,
 		Color:    opts.Color,

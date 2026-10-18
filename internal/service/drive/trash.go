@@ -136,7 +136,7 @@ func (s *Service) TrashDescribe(ctx context.Context, dc *Context, refs []TrashRe
 func (s *Service) linkMetadata(ctx context.Context, shareID string, linkIDs []string) ([]Link, error) {
 	var r struct{ Links []Link }
 	if err := s.C.Decode(ctx, proton.Request{
-		Method: "POST", Path: "/drive/shares/" + shareID + "/links/fetch_metadata",
+		Method: "POST", Reads: true, Path: "/drive/shares/" + shareID + "/links/fetch_metadata",
 		Body: map[string]any{"LinkIDs": linkIDs, "Thumbnails": 0},
 	}, &r); err != nil {
 		return nil, err
