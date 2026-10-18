@@ -54,6 +54,13 @@ func TestCoverDrive(t *testing.T) {
 	real := func(name string, args map[string]any) string {
 		t.Helper()
 		out, isErr := run("REAL", name, args)
+		// Proton answers 422 "item not found" for a moment after it creates
+		// something it is about to look up (an entry just added, a link just made).
+		// That is the server catching up, so ask again a few times before failing.
+		for try := 0; isErr && try < 4 && strings.Contains(out, "HTTP 422") && strings.Contains(out, "2501"); try++ {
+			time.Sleep(5 * time.Second)
+			out, isErr = run("REAL", name, args)
+		}
 		if isErr {
 			t.Fatalf("%s failed: %s", name, out)
 		}
