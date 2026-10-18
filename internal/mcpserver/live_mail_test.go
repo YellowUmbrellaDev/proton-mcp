@@ -151,7 +151,7 @@ func TestLiveMail(t *testing.T) {
 	payload := "línea uno\nlínea dos\ttab\n\x01\x02 fin\n"
 	ok("mail_messages_send", map[string]any{
 		"to": []any{self}, "subject": tag, "body": "cuerpo de prueba",
-		"attach": []any{map[string]any{"name": "nota.txt", "text": payload}},
+		"attach":  []any{map[string]any{"name": "nota.txt", "text": payload}},
 		"confirm": true,
 	})
 	msg := wait(tag, "inbox")
