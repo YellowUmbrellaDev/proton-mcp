@@ -18,10 +18,19 @@ func live(t *testing.T) *mcp.ClientSession {
 	if profile == "" {
 		t.Skip("PROTON_MCP_LIVE not set")
 	}
-	srv, _, err := New(Config{
+	cfg := Config{
 		Version: "live",
 		Runner:  func(context.Context) (Runner, error) { return Runner{Profile: profile}, nil },
-	})
+	}
+	// PROTON_MCP_COVERAGE=<file> appends one line per call: which tools really ran.
+	if path := os.Getenv("PROTON_MCP_COVERAGE"); path != "" {
+		log, err := OpenCoverageLog(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Record = log.Record
+	}
+	srv, _, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

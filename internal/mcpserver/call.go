@@ -22,6 +22,11 @@ type Result struct {
 	Blob    []byte
 	Name    string
 	IsError bool
+	// Held says the call was only previewed (an irreversible tool without
+	// confirm), so nothing was changed.
+	Held bool
+	// DryRun says the caller asked for a preview.
+	DryRun bool
 }
 
 // Runner runs a tool on behalf of one profile.
@@ -91,9 +96,9 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 		if msg == "" && runErr != nil {
 			msg = runErr.Error()
 		}
-		return Result{Text: msg, IsError: true}
+		return Result{Text: msg, IsError: true, Held: held, DryRun: dry}
 	}
-	res := Result{}
+	res := Result{Held: held, DryRun: dry}
 	switch {
 	case t.Download && !utf8.Valid(out.Bytes()):
 		res.Blob = out.Bytes()

@@ -17,6 +17,16 @@ type Config struct {
 	// Allow decides whether the caller may use a tool, for scopes. Nil allows
 	// everything.
 	Allow func(ctx context.Context, t Tool) error
+	// Record is told the outcome of every call. It is how coverage is measured:
+	// which tools have really run, against a real account, and which only exist.
+	Record func(t Tool, r Result)
+}
+
+// observe tells the configured hook about a call, if there is one.
+func (c Config) observe(t Tool, r Result) {
+	if c.Record != nil {
+		c.Record(t, r)
+	}
 }
 
 // New builds an MCP server with one tool per command.
@@ -48,6 +58,7 @@ func New(c Config) (*mcp.Server, []Tool, error) {
 				return textResult(fmt.Sprintf("no Proton session for this caller: %v", err), true), nil
 			}
 			res := run.Call(ctx, t, in)
+			c.observe(t, res)
 			return toResult(res), nil
 		})
 	}
