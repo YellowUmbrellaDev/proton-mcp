@@ -57,6 +57,8 @@ const (
 // that touches existing data, other people, security or billing is dry-run.
 func TestCoverMail(t *testing.T) {
 	cs := live(t)
+	own := ownAddress(t)
+	domain := own[strings.LastIndex(own, "@"):]
 	called := map[string]string{}
 	var report []string
 	step := func(mode coverMode, tool string, args map[string]any) (string, bool) {
@@ -316,7 +318,7 @@ func TestCoverMail(t *testing.T) {
 	step(modeLegit, "mail_settings_smtp_tokens_get", map[string]any{"ref": tokID})
 
 	// --- Account configuration, security and other people: dry run only.
-	step(modeDry, "mail_settings_addresses_create", map[string]any{"email": tag + "@sigterm.vodka", "display_name": "x"})
+	step(modeDry, "mail_settings_addresses_create", map[string]any{"email": tag + domain, "display_name": "x"})
 	step(modeDry, "mail_settings_addresses_delete", map[string]any{"ref": []any{addrID}})
 	step(modeDry, "mail_settings_addresses_disable", map[string]any{"ref": []any{addrID}})
 	step(modeDry, "mail_settings_addresses_enable", map[string]any{"ref": []any{addrID}})

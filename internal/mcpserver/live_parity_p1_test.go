@@ -20,8 +20,7 @@ import (
 
 // TestParityP1 holds the 77 tools that failed in the first live sweep up
 // against the official CLI. Each row is an intent written the way a person
-// would type it for the official binary (PROTON_PARITY_CLI, default
-// /tmp/proton-spike/bin/proton-cli_linux_amd64) and the same intent as an MCP
+// would type it for the official binary (PROTON_OFFICIAL_CLI) and the same intent as an MCP
 // call. Both run against the same saved session; every mutation carries
 // --dry-run / dry_run, so nothing on the account changes. An error that is the
 // same text on both sides shows the tool is faithful and the error is the
@@ -31,10 +30,7 @@ import (
 // throwaway secret text and a public key; they are what the MCP side writes
 // itself from the string / file inputs.
 func TestParityP1(t *testing.T) {
-	bin := os.Getenv("PROTON_PARITY_CLI")
-	if bin == "" {
-		bin = "/tmp/proton-spike/bin/proton-cli_linux_amd64"
-	}
+	bin := officialBinary(t)
 	if _, err := os.Stat(bin); err != nil {
 		t.Skipf("official CLI not found at %s", bin)
 	}

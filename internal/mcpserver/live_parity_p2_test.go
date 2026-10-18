@@ -17,8 +17,7 @@ import (
 )
 
 // TestParityP2 holds the MCP tools that mutate against the official Proton CLI
-// (an independent binary, PROTON_OFFICIAL_CLI, default
-// /tmp/proton-spike/bin/proton-cli_linux_amd64) on a real account, and compares
+// (an independent binary, PROTON_OFFICIAL_CLI) on a real account, and compares
 // what they answer. Every call on both sides is a preview: the MCP side with
 // dry_run:true, the CLI side with --dry-run. The test refuses to run anything
 // else: a case whose CLI line lacks --dry-run or whose MCP input lacks
@@ -30,10 +29,7 @@ import (
 // PARITY_P2_TABLE=<file> also writes a human-readable table.
 func TestParityP2(t *testing.T) {
 	cs := live(t)
-	bin := os.Getenv("PROTON_OFFICIAL_CLI")
-	if bin == "" {
-		bin = "/tmp/proton-spike/bin/proton-cli_linux_amd64"
-	}
+	bin := officialBinary(t)
 	if _, err := os.Stat(bin); err != nil {
 		t.Skipf("official CLI not found: %v", err)
 	}
@@ -134,8 +130,8 @@ func TestParityP2(t *testing.T) {
 		pw    = "throwaway-password-1"
 		pw2   = "throwaway-password-2"
 		other = "nobody@example.invalid"
-		own   = "me@sigterm.vodka"
 	)
+	own := ownAddress(t)
 	dir := t.TempDir()
 	secretFile := func(name, text string) string {
 		p := filepath.Join(dir, name)
@@ -264,7 +260,7 @@ func TestParityP2(t *testing.T) {
 			"mail", "settings", "imports", "create", "jane@fastmail.com", "--imap-password-file", imapPf, "--after", "2024-01-01", "--label", "Fastmail", "--skip", "Spam", "--skip", "Archive/*", "--port", "993", "--server", "imap.example.com"),
 		c("mail_settings_imports_delete", m("ref", a(importID)), "mail", "settings", "imports", "delete", importID),
 		c("mail_settings_set", m("key", "view-mode", "value", "conversations"), "mail", "settings", "set", "view-mode", "conversations"),
-		c("mail_settings_smtp_tokens_create", m("ref", "cms@sigterm.vodka", "name", "parity probe", "password", pw), "mail", "settings", "smtp-tokens", "create", "cms@sigterm.vodka", "--name", "parity probe", "--password-file", pf),
+		c("mail_settings_smtp_tokens_create", m("ref", own, "name", "parity probe", "password", pw), "mail", "settings", "smtp-tokens", "create", own, "--name", "parity probe", "--password-file", pf),
 		c("mail_settings_smtp_tokens_delete", m("ref", a(smtpID), "password", pw), "mail", "settings", "smtp-tokens", "delete", smtpID, "--password-file", pf),
 
 		c("pass_items_share_add", m("ref", itemID, "email", other, "access", "editor"), "pass", "items", "share", "add", itemID, other, "--access", "editor"),

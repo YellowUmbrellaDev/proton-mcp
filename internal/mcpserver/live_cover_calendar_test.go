@@ -20,6 +20,7 @@ import (
 // one only when none exists) and only previews the delete.
 func TestCoverCalendar(t *testing.T) {
 	cs := live(t)
+	own := ownAddress(t)
 	tag := "proton-mcp-test-" + time.Now().Format("20060102-150405")
 	pwFile := os.Getenv("PROTON_MCP_PASSWORD_FILE")
 	var pw string
@@ -140,7 +141,7 @@ func TestCoverCalendar(t *testing.T) {
 	// that reaches nobody.
 	clean("calendar_events_respond", map[string]any{"ref": evRef, "answer": "accept"})
 
-	if out, _ := run("calendar_busy_times_list", map[string]any{"email": []any{"me@sigterm.vodka"}, "after": day, "before": day}); out == "" {
+	if out, _ := run("calendar_busy_times_list", map[string]any{"email": []any{own}, "after": day, "before": day}); out == "" {
 		t.Error("busy times returned nothing at all")
 	}
 

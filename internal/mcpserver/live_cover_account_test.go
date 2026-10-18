@@ -16,6 +16,7 @@ import (
 // nothing is sent. No session is ever revoked.
 func TestCoverAccount(t *testing.T) {
 	cs := live(t)
+	own := ownAddress(t)
 	run := func(name string, args map[string]any) (string, bool) { return call(t, cs, name, args) }
 	show := func(name, mode string, out string, isErr bool) {
 		t.Logf("%-46s %-7s err=%-5v %.160q", name, mode, isErr, strings.ReplaceAll(out, "\n", " "))
@@ -216,9 +217,9 @@ func TestCoverAccount(t *testing.T) {
 		{"account_breaches_enable", d(map[string]any{})},
 		{"account_breaches_reopen", d(map[string]any{"ref": []any{"proton-mcp-nonexistent"}})},
 		{"account_breaches_resolve", d(map[string]any{"ref": []any{"proton-mcp-nonexistent"}})},
-		{"account_keys_create", d(map[string]any{"ref": "me@sigterm.vodka"})},
+		{"account_keys_create", d(map[string]any{"ref": own})},
 		{"account_keys_delete", d(map[string]any{"ref": []any{fakeKey}})},
-		{"account_keys_import", d(map[string]any{"ref": "me@sigterm.vodka", "src": map[string]any{"name": "k.asc", "text": importSrc}})},
+		{"account_keys_import", d(map[string]any{"ref": own, "src": map[string]any{"name": "k.asc", "text": importSrc}})},
 		{"account_keys_reactivate", d(map[string]any{})},
 		{"account_keys_update", d(map[string]any{"ref": fakeKey, "obsolete": false})},
 		{"account_security_log_delete", d(map[string]any{})},

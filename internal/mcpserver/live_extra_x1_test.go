@@ -15,10 +15,7 @@ const x1ProbeCalendar = "proton-mcp-test-probe-152139"
 // to check from outside the MCP wrapper what really happened.
 func officialCLI(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	bin := os.Getenv("PROTON_OFFICIAL_CLI")
-	if bin == "" {
-		bin = "/tmp/proton-spike/bin/proton-cli_linux_amd64"
-	}
+	bin := officialBinary(t)
 	cmd := exec.Command(bin, args...)
 	for _, e := range os.Environ() {
 		if !strings.HasPrefix(e, "PROTON_") {
@@ -54,6 +51,7 @@ func idsOf(t *testing.T, raw string) []string {
 // does not have: it shows the refusal instead.
 func TestExtraX1(t *testing.T) {
 	cs := live(t)
+	own := ownAddress(t)
 	tag := "proton-mcp-test-" + time.Now().Format("20060102-150405")
 	run := func(name string, args map[string]any) (string, bool) {
 		t.Helper()
@@ -239,7 +237,7 @@ func TestExtraX1(t *testing.T) {
 		tool string
 		args map[string]any
 	}{
-		{"mail_settings_smtp_tokens_create", map[string]any{"ref": "me@sigterm.vodka", "name": tag + "-tok"}},
+		{"mail_settings_smtp_tokens_create", map[string]any{"ref": own, "name": tag + "-tok"}},
 		{"mail_settings_domains_create", map[string]any{"domain": tag + ".invalid"}},
 	} {
 		out, isErr := run(c.tool, c.args)
@@ -247,7 +245,7 @@ func TestExtraX1(t *testing.T) {
 			t.Errorf("%s without a password should be refused for it: err=%v %.200s", c.tool, isErr, out)
 		}
 	}
-	if o, e := officialCLI(t, "mail", "settings", "smtp-tokens", "create", "me@sigterm.vodka", "--name", tag+"-tok", "--no-input"); e == nil || !strings.Contains(o, "password") {
+	if o, e := officialCLI(t, "mail", "settings", "smtp-tokens", "create", own, "--name", tag+"-tok", "--no-input"); e == nil || !strings.Contains(o, "password") {
 		t.Errorf("official CLI: %v %s", e, o)
 	} else {
 		t.Logf("official CLI refuses smtp-tokens create: %.120q", o)

@@ -20,8 +20,8 @@ func TestCoverPass(t *testing.T) {
 	cs := live(t)
 	stamp := time.Now().Format("150405")
 	tag := "proton-mcp-test-" + stamp
-	const own = "me@sigterm.vodka" // an address of this account: the only one mail goes to
-	const primary = "sigterm015@proton.me"
+	own := ownAddress(t) // an address of this account: the only one mail goes to
+	primary := primaryAddress(t)
 	const other = "nobody@example.invalid"
 
 	const (

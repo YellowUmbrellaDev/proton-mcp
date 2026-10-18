@@ -17,7 +17,7 @@ import (
 func TestExtraX2(t *testing.T) {
 	cs := live(t)
 	tag := "proton-mcp-test-" + time.Now().Format("150405")
-	const own = "me@sigterm.vodka" // an address of this account: the only one mail goes to
+	own := ownAddress(t) // an address of this account: the only one mail goes to
 
 	real := func(name string, args map[string]any) string {
 		t.Helper()
@@ -56,7 +56,7 @@ func TestExtraX2(t *testing.T) {
 	// official runs the official CLI (no PROTON_* variables) for inspection.
 	official := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("/tmp/proton-spike/bin/proton-cli_linux_amd64", args...)
+		cmd := exec.Command(officialBinary(t), args...)
 		for _, e := range os.Environ() {
 			if !strings.HasPrefix(e, "PROTON_") {
 				cmd.Env = append(cmd.Env, e)
