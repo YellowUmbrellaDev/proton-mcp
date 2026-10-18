@@ -66,14 +66,37 @@ type Tool struct {
 	Download bool
 }
 
-// outward are verbs that cannot be taken back even though the CLI does not call
-// them irreversible: they reach other people or the public, or (merge) delete
-// the duplicates it folds in, across the whole account and with no way to name
-// which. A server must not do them on a first call.
-var outward = map[string]bool{
-	"send": true, "reply": true, "forward": true, "share": true, "invite": true,
-	"transfer": true, "grant": true, "merge": true,
+// Some commands cannot be taken back, or reach other people, although the CLI
+// does not call them irreversible. A server must not run them on a first call: it
+// previews them until the caller passes confirm.
+//
+// What decides it is the whole path, not the last word. `drive items share add`
+// ends in `add`, a verb a hundred harmless commands share; what makes it reach
+// someone is the `share` in the middle. So there are two lists: groups of
+// commands whose every mutating member reaches people, and single verbs that do
+// so wherever they appear.
+
+// reachingGroups are path segments such that any mutating command beneath them
+// acts on other people, a public link, or the way the account can be recovered or
+// reached: sharing, invitations, emergency access, recovery contacts and
+// forwarding.
+var reachingGroups = map[string]bool{
+	"share": true, "invitations": true, "emergency-access": true,
+	"recovery-contacts": true, "forwarding": true, "shared": true, "links": true,
 }
+
+// reachingVerbs are verbs that reach people or cannot be undone wherever they
+// are used: sending, answering an invitation, handing something over, merging.
+var reachingVerbs = map[string]bool{
+	"send": true, "reply": true, "forward": true, "invite": true, "resend": true,
+	"respond": true, "request": true, "access": true, "transfer": true,
+	"grant": true, "merge": true, "accept": true, "decline": true, "abuse": true,
+	"unsubscribe": true, "receipt": true, "phishing": true, "legitimate": true,
+}
+
+// exportsSecrets are read-only commands whose output is every secret of the
+// account in the clear. They have no preview, so they are held like a write.
+var exportsSecrets = map[string]bool{"pass export": true, "account keys export": true}
 
 // alsoMutating are verbs the CLI's own list of mutating verbs leaves out although
 // every command with one goes through kit.Mutate: `verify` sends a confirmation
@@ -83,7 +106,21 @@ var alsoMutating = map[string]bool{"verify": true}
 
 // NeedsConfirm says whether a tool is previewed until the caller passes confirm.
 func (t Tool) NeedsConfirm() bool {
-	return t.Irreversible || (t.Mutating && outward[t.Path[len(t.Path)-1]])
+	if t.Irreversible || exportsSecrets[strings.Join(t.Path, " ")] {
+		return true
+	}
+	if !t.Mutating {
+		return false
+	}
+	if reachingVerbs[t.Path[len(t.Path)-1]] {
+		return true
+	}
+	for _, seg := range t.Path[:len(t.Path)-1] {
+		if reachingGroups[seg] {
+			return true
+		}
+	}
+	return false
 }
 
 // Options decide which commands become tools.

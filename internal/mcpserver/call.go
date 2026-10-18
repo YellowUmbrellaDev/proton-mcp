@@ -63,12 +63,25 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 		// caller is told how to go through with it.
 		dry, held = true, true
 	}
+	if t.Download && dry {
+		// A download is a read: there is no preview of it to give, and running it
+		// "as a dry run" would just run it. So it is not run at all.
+		if held {
+			return Result{Text: "Nothing was run. This hands over secrets in the clear, so it waits for a go-ahead.\n\nCall again with confirm: true to do it.", Held: true, DryRun: true}
+		}
+		return failure("dry_run does not apply to a download: it reads and returns what it finds, with no preview. Leave dry_run out.")
+	}
 
 	zone := r.Zone
 	if zone == "" {
 		zone = "UTC"
 	}
-	global := []string{"--output", "json", "--no-input", "--no-log", "--quiet", "--profile", r.Profile, "--zone", zone}
+	// The same safety flags for every tool; only the output format differs, because
+	// a download's payload is the answer itself and not a JSON envelope.
+	global := []string{"--no-input", "--no-log", "--quiet", "--profile", r.Profile, "--zone", zone}
+	if !t.Download {
+		global = append(global, "--output", "json")
+	}
 	if r.Confirm != "" {
 		global = append(global, "--confirm", r.Confirm)
 	}
@@ -77,9 +90,6 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 	}
 	if confirmed {
 		global = append(global, "--yes")
-	}
-	if t.Download {
-		global = []string{"--no-input", "--no-log", "--quiet", "--profile", r.Profile, "--zone", zone}
 	}
 	full := append(append([]string{}, global...), t.Path...)
 	if t.Download {

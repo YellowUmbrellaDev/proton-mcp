@@ -146,7 +146,11 @@ func schema(t Tool) map[string]any {
 		props["dry_run"] = map[string]any{"type": "boolean", "description": "Preview the change without making it."}
 	}
 	if t.Irreversible {
-		props["confirm"] = map[string]any{"type": "boolean", "description": "Required to go through with something that cannot be undone. Without it the call is only previewed."}
+		desc := "Required to go through with something that cannot be undone or that reaches other people. Without it the call is only previewed."
+		if t.Download {
+			desc = "Required: this returns secrets in the clear, and has no preview. Without it nothing is run."
+		}
+		props["confirm"] = map[string]any{"type": "boolean", "description": desc}
 	}
 	out := map[string]any{"type": "object", "properties": props}
 	if len(required) > 0 {
