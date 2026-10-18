@@ -94,10 +94,14 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 		return Result{Text: msg, IsError: true}
 	}
 	res := Result{}
-	if t.Download && !utf8.Valid(out.Bytes()) {
+	switch {
+	case t.Download && !utf8.Valid(out.Bytes()):
 		res.Blob = out.Bytes()
 		res.Name = strings.Join(t.Path, "_")
-	} else {
+	case t.Download:
+		// A file's own leading and trailing whitespace is part of its content.
+		res.Text = out.String()
+	default:
 		res.Text = strings.TrimSpace(out.String())
 	}
 	if held {
