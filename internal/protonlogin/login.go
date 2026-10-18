@@ -88,6 +88,10 @@ type Login struct {
 	closed   bool
 	// forgetFailures counts, per subject, the Forgets in a row whose revoke failed.
 	forgetFailures map[string]int
+	// forgotten holds the subjects whose session this server is revoking, or has
+	// revoked, on purpose, so that a refused read of one is not taken for Proton
+	// ending it by itself. Subjects are random and never reused.
+	forgotten map[string]time.Time
 	// revokes tracks the background revokes, so Close (and tests) can wait.
 	revokes sync.WaitGroup
 }
@@ -138,7 +142,7 @@ func New(cfg Config) (*Login, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
-	return &Login{cfg: cfg, newCode: fork.New, attempts: map[string]*attempt{}, forgetFailures: map[string]int{}}, nil
+	return &Login{cfg: cfg, newCode: fork.New, attempts: map[string]*attempt{}, forgetFailures: map[string]int{}, forgotten: map[string]time.Time{}}, nil
 }
 
 func randomSubject() string { return "u" + randomHex(8) }
@@ -372,11 +376,21 @@ func (l *Login) revokeAnonymous(anon, subject *proton.Client) {
 		})
 		check, cancelCheck := context.WithTimeout(context.Background(), revokeTimeout)
 		defer cancelCheck()
-		if _, err := account.New(subject, nil).Get(check); errors.Is(err, proton.ErrUnauthorized) {
+		if _, err := account.New(subject, nil).Get(check); errors.Is(err, proton.ErrUnauthorized) && !l.wasForgotten(subject.Profile()) {
 			l.cfg.Logger.Warn("a sign-in was approved, but its session was refused right after the anonymous session it was opened under was revoked: revoking that session may end the new one. If every sign-in fails this way, run with -keep-anonymous-session",
 				"subject", subject.Profile())
 		}
 	}()
+}
+
+// wasForgotten says whether this server has revoked the subject's session on
+// purpose (a refused consent, an expired sign-in, a revoked grant), in which case
+// a refused read of it says nothing about Proton.
+func (l *Login) wasForgotten(subject string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.forgotten[subject]
+	return ok
 }
 
 // revokeLater revokes the session c holds, in the background and within
@@ -471,6 +485,15 @@ func (l *Login) Forget(ctx context.Context, subject string) error {
 	if err != nil {
 		return fmt.Errorf("protonlogin: forget: %w", err)
 	}
+	l.mu.Lock()
+	l.forgotten[name.String()] = l.cfg.Now()
+	// Subjects are never reused, so an old entry can only be stale.
+	for k, at := range l.forgotten {
+		if l.cfg.Now().Sub(at) > time.Hour {
+			delete(l.forgotten, k)
+		}
+	}
+	l.mu.Unlock()
 	sess, err := session.Load(name)
 	if err != nil {
 		return fmt.Errorf("protonlogin: forget: %w", err)

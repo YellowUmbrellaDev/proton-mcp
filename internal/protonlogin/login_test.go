@@ -1103,3 +1103,46 @@ func TestARevokeThatEndsTheNewSessionIsReported(t *testing.T) {
 		})
 	}
 }
+
+// A refused read right after the anonymous parent is revoked is only a sign that
+// Proton ended the child when the subject was not forgotten on purpose. A consent
+// that is denied forgets the subject while the probe may still be in flight, and
+// that revocation is this server's own doing: no warning for it.
+func TestADeniedConsentDoesNotWarnAboutTheParentRevoke(t *testing.T) {
+	f := newFake(t)
+	f.forkDiesWithParent = true // the probe will be refused, as in the real case the warning is for
+	var logs syncBuilder
+	l := newLogin(t, f, newClock())
+	l.cfg.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	// The subject is forgotten (consent denied) the moment the anonymous parent's
+	// revoke is seen, before the probe's answer is judged.
+	f.onRevoke = func(uid string) {
+		if strings.HasPrefix(uid, "anon-") {
+			l.mu.Lock()
+			l.forgotten["u0123456789abcdef"] = l.cfg.Now()
+			l.mu.Unlock()
+		}
+	}
+	signedIn(t, f, l)
+	if got := logs.String(); strings.Contains(got, "-keep-anonymous-session") {
+		t.Errorf("warned about a session this server revoked on purpose: %q", got)
+	}
+}
+
+// Forget marks the subject before it touches Proton, so the probe sees it even if
+// it runs first.
+func TestForgetMarksTheSubjectBeforeRevoking(t *testing.T) {
+	f := newFake(t)
+	l := newLogin(t, f, newClock())
+	subject := signedIn(t, f, l)
+	if l.wasForgotten(subject) {
+		t.Fatal("a subject that was never forgotten is marked")
+	}
+	if err := l.Forget(context.Background(), subject); err != nil {
+		t.Fatal(err)
+	}
+	if !l.wasForgotten(subject) {
+		t.Error("Forget did not mark the subject")
+	}
+}

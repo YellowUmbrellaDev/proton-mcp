@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -109,7 +110,7 @@ func run(fs *flag.FlagSet, args []string) error {
 		if err != nil {
 			return err
 		}
-		login, err := newLogin(protonlogin.Config{KeepAnonymousSession: *keepAnon})
+		login, err := newLogin(loginConfig(*keepAnon, os.Stderr))
 		if err != nil {
 			return err
 		}
@@ -166,6 +167,17 @@ func run(fs *flag.FlagSet, args []string) error {
 		return err
 	}
 	return nil
+}
+
+// loginConfig is the configuration of the Proton login. Its operator warnings (a
+// session Proton ended together with its parent, a revoke that keeps failing) are
+// the signal for -keep-anonymous-session, so they must reach the log: the login's
+// own default is to discard everything. Info and up never carry tokens.
+func loginConfig(keepAnonymous bool, w io.Writer) protonlogin.Config {
+	return protonlogin.Config{
+		KeepAnonymousSession: keepAnonymous,
+		Logger:               slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	}
 }
 
 // minTokenBytes is the shortest bearer token the server will accept. A file that
