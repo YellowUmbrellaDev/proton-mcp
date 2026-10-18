@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"flag"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -149,5 +150,21 @@ func TestOAuthModeClosesTheMCPPath(t *testing.T) {
 	// Everything else belongs to the authorization server.
 	if rec := get(h, "/.well-known/oauth-authorization-server"); rec.Code == 200 && rec.Body.String() == "mcp" {
 		t.Error("the MCP handler answered an auth path")
+	}
+}
+
+// run returns its errors instead of exiting, so the deferred Close of the login
+// and of the authorization server always runs: log.Fatal would skip it.
+func TestRunReturnsAnErrorInsteadOfExiting(t *testing.T) {
+	for name, args := range map[string][]string{
+		"oauth without its files":    {"-oauth", "-issuer", "https://x.example"},
+		"oauth with a shared token":  {"-oauth", "-token-file", "/dev/null", "-issuer", "https://x.example", "-state", "s", "-key-file", "k"},
+		"http with no auth at all":   {"-addr", "127.0.0.1:0"},
+		"a zone that does not exist": {"-zone", "Not/AZone"},
+	} {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		if err := run(fs, args); err == nil {
+			t.Errorf("%s: no error", name)
+		}
 	}
 }

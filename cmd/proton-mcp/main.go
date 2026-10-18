@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -22,46 +23,57 @@ import (
 var version = "dev"
 
 func main() {
+	if err := run(flag.CommandLine, os.Args[1:]); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// run is main without log.Fatal: Fatal exits without running deferred calls, and
+// the deferred Close of the login and the authorization server is what revokes
+// the sign-ins nobody finished.
+func run(fs *flag.FlagSet, args []string) error {
 	var (
-		profile   = flag.String("profile", "default", "saved session the tools act as (static-token and stdio modes)")
-		stdio     = flag.Bool("stdio", false, "serve one client over stdin/stdout instead of HTTP")
-		addr      = flag.String("addr", "127.0.0.1:8080", "HTTP listen address")
-		token     = flag.String("token-file", "", "file holding the bearer token HTTP clients must present")
-		oauth     = flag.Bool("oauth", false, "serve many people behind OAuth: each signs in once and their tool calls act as their own Proton session")
-		issuer    = flag.String("issuer", "", "with -oauth: the public base URL, e.g. https://proton-mcp.example.com")
-		state     = flag.String("state", "", "with -oauth: file where clients, grants and tokens are kept")
-		keyFile   = flag.String("key-file", "", "with -oauth: file holding the key that seals the state (32+ bytes, or base64 of 32 bytes)")
-		enableAPI = flag.Bool("enable-api", false, "expose the raw `api` command")
-		confirm   = flag.String("confirm", "", "confirmation policy handed to every command")
-		zone      = flag.String("zone", "UTC", "IANA time zone commands work in")
-		perMinute = flag.Float64("max-calls-per-minute", 30, "average tool calls a minute (0 for no limit)")
-		burst     = flag.Int("burst", 5, "tool calls allowed back to back")
-		behind    = flag.Bool("behind-proxy", false, "with -oauth: take the client address for rate limits from the last X-Forwarded-For entry (only when every request arrives through that proxy)")
-		list      = flag.Bool("list", false, "print the tools and exit")
+		profile   = fs.String("profile", "default", "saved session the tools act as (static-token and stdio modes)")
+		stdio     = fs.Bool("stdio", false, "serve one client over stdin/stdout instead of HTTP")
+		addr      = fs.String("addr", "127.0.0.1:8080", "HTTP listen address")
+		token     = fs.String("token-file", "", "file holding the bearer token HTTP clients must present")
+		oauth     = fs.Bool("oauth", false, "serve many people behind OAuth: each signs in once and their tool calls act as their own Proton session")
+		issuer    = fs.String("issuer", "", "with -oauth: the public base URL, e.g. https://proton-mcp.example.com")
+		state     = fs.String("state", "", "with -oauth: file where clients, grants and tokens are kept")
+		keyFile   = fs.String("key-file", "", "with -oauth: file holding the key that seals the state (32+ bytes, or base64 of 32 bytes)")
+		enableAPI = fs.Bool("enable-api", false, "expose the raw `api` command")
+		confirm   = fs.String("confirm", "", "confirmation policy handed to every command")
+		zone      = fs.String("zone", "UTC", "IANA time zone commands work in")
+		perMinute = fs.Float64("max-calls-per-minute", 30, "average tool calls a minute (0 for no limit)")
+		burst     = fs.Int("burst", 5, "tool calls allowed back to back")
+		behind    = fs.Bool("behind-proxy", false, "with -oauth: take the client address for rate limits from the last X-Forwarded-For entry (only when every request arrives through that proxy)")
+		list      = fs.Bool("list", false, "print the tools and exit")
 	)
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	opts := mcpserver.Options{EnableAPI: *enableAPI}
 	if *list {
 		tools, left, err := mcpserver.Catalog(opts)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		for _, t := range tools {
 			fmt.Println(t.Name)
 		}
 		fmt.Fprintf(os.Stderr, "%d tools, %d commands left out\n", len(tools), len(left))
-		return
+		return nil
 	}
 
 	if *oauth {
 		switch {
 		case *token != "":
-			log.Fatal("-oauth and -token-file cannot be combined: a shared token would bypass the per-person sign-in")
+			return errors.New("-oauth and -token-file cannot be combined: a shared token would bypass the per-person sign-in")
 		case *stdio:
-			log.Fatal("-oauth needs HTTP: it cannot be combined with -stdio")
+			return errors.New("-oauth needs HTTP: it cannot be combined with -stdio")
 		case *state == "" || *keyFile == "":
-			log.Fatal("-oauth needs -issuer, -state and -key-file")
+			return errors.New("-oauth needs -issuer, -state and -key-file")
 		}
 	}
 	// Commands read the process's local time zone, which is global to the process,
@@ -69,7 +81,7 @@ func main() {
 	// names this same zone and writes nothing.
 	loc, err := time.LoadLocation(*zone)
 	if err != nil {
-		log.Fatalf("-zone: %v", err)
+		return fmt.Errorf("-zone: %v", err)
 	}
 	time.Local = loc
 
@@ -88,16 +100,16 @@ func main() {
 	if *oauth {
 		base, err := parseIssuer(*issuer)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		*issuer = base
 		key, err := loadKey(*keyFile)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		login, err := newLogin()
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		if c, ok := login.(io.Closer); ok {
 			// Revokes the sign-ins nobody finished, so shutdown leaves no session at Proton.
@@ -105,7 +117,7 @@ func main() {
 		}
 		authSrv, err = mcpauth.New(mcpauth.Config{Issuer: base, StatePath: *state, Key: key, Login: login, ClientIP: clientIP})
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		defer func() { _ = authSrv.Close() }()
 		cfg.Runner = mcpserver.RunnerFromToken(defaults)
@@ -113,17 +125,14 @@ func main() {
 	}
 	server, tools, err := mcpserver.New(cfg)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if *stdio {
-		if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
-			log.Fatal(err)
-		}
-		return
+		return server.Run(ctx, &mcp.StdioTransport{})
 	}
 
 	var mux *http.ServeMux
@@ -134,15 +143,15 @@ func main() {
 	case *token != "":
 		secret, err := os.ReadFile(*token)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		if err := checkToken(string(secret)); err != nil {
-			log.Fatalf("--token-file: %v", err)
+			return fmt.Errorf("--token-file: %v", err)
 		}
 		mux = staticMux(string(secret), streamable(server))
 		log.Printf("proton-mcp %s: %d tools on http://%s", version, len(tools), *addr)
 	default:
-		log.Fatal("HTTP needs --token-file or --oauth: refusing to serve a Proton account without authentication")
+		return errors.New("HTTP needs --token-file or --oauth: refusing to serve a Proton account without authentication")
 	}
 	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -152,8 +161,9 @@ func main() {
 		_ = srv.Shutdown(shutdown)
 	}()
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		return err
 	}
+	return nil
 }
 
 // minTokenBytes is the shortest bearer token the server will accept. A file that
