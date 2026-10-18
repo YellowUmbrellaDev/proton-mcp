@@ -1,6 +1,7 @@
 package drive
 
 import (
+	"context"
 	"reflect"
 	"testing"
 )
@@ -32,5 +33,19 @@ func TestChunkCutsIntoBatches(t *testing.T) {
 func TestChunkOfNothingIsNoRequests(t *testing.T) {
 	if got := chunk(nil, linkBatch); got != nil {
 		t.Errorf("chunk(nil) = %v, want no batches", got)
+	}
+}
+
+// Asking what links are is a question, however it is sent: a dry run has to be
+// able to look at an album or a photo to say what it would do to it.
+func TestTheLinkMetadataQuestionIsAReadDespiteBeingAPost(t *testing.T) {
+	tr := newTree(t, shareTypeDevice, protonFolder, "Work laptop")
+	s, doer := tr.service(map[string]string{"POST /drive/shares/" + testShareID + "/links/fetch_metadata": `{"Code":1000,"Links":[]}`})
+	if _, err := s.linkMetadata(context.Background(), testShareID, []string{"a-link"}); err != nil {
+		t.Fatal(err)
+	}
+	req := doer.last()
+	if req.Method != "POST" || !req.Reads {
+		t.Errorf("%s %s does not say it only reads, so --dry-run would refuse it", req.Method, req.Path)
 	}
 }
