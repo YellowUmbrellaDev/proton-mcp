@@ -75,6 +75,12 @@ var outward = map[string]bool{
 	"transfer": true, "grant": true, "merge": true,
 }
 
+// alsoMutating are verbs the CLI's own list of mutating verbs leaves out although
+// every command with one goes through kit.Mutate: `verify` sends a confirmation
+// email or SMS, or marks an address as confirmed. Left out, a tool is advertised
+// as read-only and has no dry_run input, so a caller could not preview it.
+var alsoMutating = map[string]bool{"verify": true}
+
 // NeedsConfirm says whether a tool is previewed until the caller passes confirm.
 func (t Tool) NeedsConfirm() bool {
 	return t.Irreversible || (t.Mutating && outward[t.Path[len(t.Path)-1]])
@@ -166,7 +172,7 @@ func build(c *cobra.Command, path []string, enums map[string][]string) (Tool, er
 	t := Tool{
 		Name:         strings.ReplaceAll(strings.Join(path, "_"), "-", "_"),
 		Path:         path,
-		Mutating:     kit.Mutating[c.Name()],
+		Mutating:     kit.Mutating[c.Name()] || alsoMutating[c.Name()],
 		Irreversible: kit.Irreversible[c.Name()],
 	}
 	if t.NeedsConfirm() {

@@ -54,3 +54,32 @@ func TestSendingMailNeedsConfirm(t *testing.T) {
 		t.Errorf("tool %s does not exist", n)
 	}
 }
+
+// A verify command sends an email or an SMS, or confirms an address. It has to
+// be a write tool: advertised as read-only with no dry_run, a caller could not
+// preview it.
+func TestVerifyToolsAreWriteTools(t *testing.T) {
+	tools, _, err := Catalog(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, tool := range tools {
+		if tool.Path[len(tool.Path)-1] != "verify" {
+			continue
+		}
+		found++
+		if !tool.Mutating {
+			t.Errorf("%s is not marked as a write tool", tool.Name)
+		}
+		if _, ok := schema(tool)["properties"].(map[string]any)["dry_run"]; !ok {
+			t.Errorf("%s has no dry_run input", tool.Name)
+		}
+		if a := annotations(tool); a.ReadOnlyHint {
+			t.Errorf("%s is advertised as read-only", tool.Name)
+		}
+	}
+	if found != 4 {
+		t.Errorf("expected 4 verify tools, found %d", found)
+	}
+}
