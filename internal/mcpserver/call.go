@@ -97,6 +97,9 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 	if t.Download && !utf8.Valid(out.Bytes()) {
 		res.Blob = out.Bytes()
 		res.Name = strings.Join(t.Path, "_")
+	} else if t.Download {
+		// A download is the file itself: its last newline is part of it.
+		res.Text = out.String()
 	} else {
 		res.Text = strings.TrimSpace(out.String())
 	}
@@ -104,7 +107,7 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 		res.Text = "Nothing was changed. This cannot be undone, so it was only previewed:\n\n" +
 			res.Text + "\n\nCall again with confirm: true to do it."
 	}
-	if res.Text == "" && res.Blob == nil {
+	if strings.TrimSpace(res.Text) == "" && res.Blob == nil {
 		res.Text = "Done."
 	}
 	return res
