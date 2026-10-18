@@ -278,7 +278,8 @@ func TestLiveSend(t *testing.T) {
 
 func TestLiveCalendarAndPass(t *testing.T) {
 	cs := live(t)
-	tag := "proton-mcp-test-" + time.Now().Format("150405")
+	stamp := time.Now().Format("150405")
+	tag := "proton-mcp-test-" + stamp
 	ok := func(name string, args map[string]any) string {
 		out, isErr := call(t, cs, name, args)
 		t.Logf("%-26s err=%-5v %.100q", name, isErr, strings.ReplaceAll(out, "\n", " "))
@@ -294,36 +295,161 @@ func TestLiveCalendarAndPass(t *testing.T) {
 		_ = json.Unmarshal([]byte(raw), &m)
 		return m.IDs
 	}
+	one := func(raw string) string {
+		ids := idsOf(raw)
+		if len(ids) != 1 {
+			t.Fatalf("expected one id, got %v from %.200s", ids, raw)
+		}
+		return ids[0]
+	}
+	day := func(d int) string { return time.Now().UTC().AddDate(0, 0, d).Format("2006-01-02") }
 
 	// --- Calendar: create, update, read back, delete.
 	start := time.Now().Add(72 * time.Hour).Format("2006-01-02 15:04")
-	ev := idsOf(ok("calendar_events_create", map[string]any{"title": tag, "start": start, "duration": "30m", "location": "MCP"}))
-	if len(ev) != 1 {
-		t.Fatalf("expected one event id, got %v", ev)
-	}
-	t.Cleanup(func() { call(t, cs, "calendar_events_delete", map[string]any{"ref": []any{ev[0]}, "confirm": true}) })
-	ok("calendar_events_update", map[string]any{"ref": ev[0], "location": "MCP actualizado"})
-	if got := ok("calendar_events_get", map[string]any{"ref": ev[0]}); !strings.Contains(got, "MCP actualizado") {
+	evID := one(ok("calendar_events_create", map[string]any{"title": tag, "start": start, "duration": "30m", "location": "MCP"}))
+	t.Cleanup(func() { call(t, cs, "calendar_events_delete", map[string]any{"ref": []any{evID}, "confirm": true}) })
+	ok("calendar_events_update", map[string]any{"ref": evID, "location": "MCP actualizado"})
+	if got := ok("calendar_events_get", map[string]any{"ref": evID}); !strings.Contains(got, "MCP actualizado") {
 		t.Errorf("event update not visible: %.300s", got)
 	}
-	ok("calendar_events_delete", map[string]any{"ref": []any{ev[0]}, "confirm": true})
+	ok("calendar_events_delete", map[string]any{"ref": []any{evID}, "confirm": true})
 
-	// --- Pass: a vault of its own, an item inside, trash, delete, remove the vault.
-	vault := idsOf(ok("pass_vaults_create", map[string]any{"name": tag}))
-	if len(vault) != 1 {
-		t.Fatalf("expected one vault id, got %v", vault)
+	// An invitation to an outside address would be mailed, so the attendee input
+	// is only checked through a dry run: it must reach the command and be accepted.
+	dry := ok("calendar_events_create", map[string]any{
+		"title": tag + "-att", "start": day(5) + "T10:00", "duration": "1h",
+		"attendee": []any{"nobody@example.invalid", "other@example.invalid:optional"}, "dry_run": true,
+	})
+	if !strings.Contains(dry, `"dry_run": true`) {
+		t.Errorf("dry run was not reported: %.200s", dry)
 	}
-	t.Cleanup(func() { call(t, cs, "pass_vaults_delete", map[string]any{"ref": vault[0], "confirm": true}) })
-	item := idsOf(ok("pass_items_create", map[string]any{
-		"type": "login", "into": vault[0], "name": tag, "username": "u", "generate_password": true, "url": []any{"example.com"},
+
+	// Reminders and a repeating rule, then an all-day event.
+	recID := one(ok("calendar_events_create", map[string]any{
+		"title": tag + "-rec", "start": day(6) + "T09:00", "duration": "15m",
+		"remind": []any{"15m", "1d:email"}, "rrule": "FREQ=DAILY;COUNT=3",
 	}))
-	if len(item) != 1 {
-		t.Fatalf("expected one item id, got %v", item)
+	t.Cleanup(func() { call(t, cs, "calendar_events_delete", map[string]any{"ref": []any{recID}, "confirm": true}) })
+	got := ok("calendar_events_get", map[string]any{"ref": recID})
+	if !strings.Contains(got, "FREQ=DAILY") || !strings.Contains(got, "reminders") {
+		t.Errorf("rrule/remind not stored: %.600s", got)
 	}
-	if got := ok("pass_items_get", map[string]any{"ref": item[0]}); !strings.Contains(got, tag) {
+	allID := one(ok("calendar_events_create", map[string]any{"title": tag + "-allday", "start": day(8), "all_day": true}))
+	t.Cleanup(func() { call(t, cs, "calendar_events_delete", map[string]any{"ref": []any{allID}, "confirm": true}) })
+	if got := ok("calendar_events_get", map[string]any{"ref": allID}); !strings.Contains(got, `"all_day": true`) {
+		t.Errorf("all-day not stored: %.400s", got)
+	}
+
+	// An .ics given as content.
+	uid := "proton-mcp-test-" + stamp + "@example.invalid"
+	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//proton-mcp-test//EN\r\nBEGIN:VEVENT\r\nUID:" + uid +
+		"\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:" + strings.ReplaceAll(day(9), "-", "") + "T120000Z\r\nDTEND:" +
+		strings.ReplaceAll(day(9), "-", "") + "T130000Z\r\nSUMMARY:" + tag + "-ics\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	ok("calendar_events_import", map[string]any{"path": map[string]any{"name": "t.ics", "text": ics}})
+	// The import names no ids, so the event is found by its title.
+	var icsID string
+	lst := ok("calendar_events_list", map[string]any{"keyword": tag + "-ics", "after": day(0), "before": day(30)})
+	var el struct {
+		Events []struct {
+			ID         string `json:"id"`
+			CalendarID string `json:"calendar_id"`
+		} `json:"events"`
+	}
+	_ = json.Unmarshal([]byte(lst), &el)
+	if len(el.Events) != 1 {
+		t.Fatalf("expected the one imported event: %.300s", lst)
+	}
+	// A listed id is only a reference once it carries its calendar.
+	icsID = el.Events[0].CalendarID + "/" + el.Events[0].ID
+	t.Cleanup(func() { call(t, cs, "calendar_events_delete", map[string]any{"ref": []any{icsID}, "confirm": true}) })
+	if got := ok("calendar_events_get", map[string]any{"ref": icsID}); !strings.Contains(got, tag+"-ics") {
+		t.Errorf("imported event not readable: %.300s", got)
+	}
+	for _, id := range []string{recID, allID, icsID} {
+		ok("calendar_events_delete", map[string]any{"ref": []any{id}, "confirm": true})
+	}
+
+	// --- Pass: two vaults of our own.
+	vault := one(ok("pass_vaults_create", map[string]any{"name": tag}))
+	t.Cleanup(func() { call(t, cs, "pass_vaults_delete", map[string]any{"ref": []any{vault}, "confirm": true}) })
+	vault2 := one(ok("pass_vaults_create", map[string]any{"name": tag + "-b"}))
+	t.Cleanup(func() { call(t, cs, "pass_vaults_delete", map[string]any{"ref": []any{vault2}, "confirm": true}) })
+
+	login := one(ok("pass_items_create", map[string]any{
+		"type": "login", "vault": vault, "name": tag, "username": "u", "generate_password": true, "url": []any{"example.com"},
+	}))
+	if got := ok("pass_items_get", map[string]any{"ref": login}); !strings.Contains(got, tag) {
 		t.Errorf("item not readable: %.200s", got)
 	}
-	ok("pass_items_trash", map[string]any{"ref": []any{item[0]}})
-	ok("pass_items_delete", map[string]any{"ref": []any{item[0]}, "confirm": true})
-	ok("pass_vaults_delete", map[string]any{"ref": vault[0], "confirm": true})
+	note := one(ok("pass_items_create", map[string]any{"type": "note", "vault": vault, "name": tag + "-note", "note": "line one"}))
+	card := one(ok("pass_items_create", map[string]any{
+		"type": "credit-card", "vault": vault, "name": tag + "-card", "holder": "MCP Test", "expiry": "2031-04",
+		"secrets": []any{map[string]any{"field": "number", "text": "4111111111111111"}},
+	}))
+	if got := ok("pass_items_get", map[string]any{"ref": card}); strings.Contains(got, "4111111111111111") {
+		t.Logf("card number appears in get output (a fake test number)")
+	}
+	custom := one(ok("pass_items_create", map[string]any{
+		"type": "custom", "vault": vault, "name": tag + "-custom",
+		"field":   []any{"Network/SSID=home"},
+		"secrets": []any{map[string]any{"field": "Network/Key", "text": "hunter2"}},
+	}))
+	if got := ok("pass_items_get", map[string]any{"ref": custom}); !strings.Contains(got, "SSID") {
+		t.Errorf("custom field not stored: %.300s", got)
+	}
+
+	// An attachment (needs a paid plan; report rather than fail when refused).
+	if out, isErr := call(t, cs, "pass_items_create", map[string]any{
+		"type": "note", "vault": vault, "name": tag + "-att", "attach": []any{map[string]any{"name": "a.txt", "text": "adjunto"}},
+	}); isErr {
+		t.Logf("attach refused: %.200s", out)
+	} else {
+		t.Logf("attach accepted: %.200s", out)
+	}
+
+	// Folders (paid plan as well).
+	if out, isErr := call(t, cs, "pass_folders_create", map[string]any{"name": tag + "-f", "vault": vault}); isErr {
+		t.Logf("folders refused: %.200s", out)
+	} else {
+		t.Logf("folder created: %.200s", out)
+		f := one(out)
+		ok("pass_folders_delete", map[string]any{"ref": []any{f}, "confirm": true})
+	}
+
+	// Move the note to the second vault: it gets a new ID.
+	moved := one(ok("pass_items_move", map[string]any{"ref": []any{note}, "into": vault2}))
+	if moved == note {
+		t.Logf("move kept the id")
+	}
+	if got := ok("pass_items_get", map[string]any{"ref": moved}); !strings.Contains(got, tag+"-note") {
+		t.Errorf("moved note not readable: %.200s", got)
+	}
+
+	// Import a Chrome-style CSV into our own vault only (--vault), given as content.
+	csv := "name,url,username,password,note\n" + tag + "-imp,https://example.com,u,pw-not-real,from csv\n"
+	ok("pass_import", map[string]any{"path": map[string]any{"name": "c.csv", "text": csv}, "manager": "chrome", "vault": vault2})
+	il := ok("pass_items_list", map[string]any{"vault": vault2})
+	if !strings.Contains(il, tag+"-imp") {
+		t.Errorf("imported item not in the vault: %.300s", il)
+	}
+	// pass export cannot be limited to one vault (it writes every vault the account
+	// owns), so it is not exercised against the real account.
+
+	// A deliberately wrong input comes back as a tool error, not a protocol error.
+	for name, args := range map[string]map[string]any{
+		"pass_items_create":      {"type": "banana", "vault": vault, "name": tag},
+		"pass_items_get":         {"nonsense": 1},
+		"calendar_events_create": {"title": tag, "start": "not a date"},
+	} {
+		out, isErr := call(t, cs, name, args)
+		if !isErr || out == "" {
+			t.Errorf("%s with a wrong input: isErr=%v out=%q", name, isErr, out)
+		}
+		t.Logf("wrong input to %s -> isError=%v %.120q", name, isErr, out)
+	}
+
+	ok("pass_items_trash", map[string]any{"ref": []any{login}})
+	ok("pass_items_delete", map[string]any{"ref": []any{login}, "confirm": true})
+	ok("pass_vaults_delete", map[string]any{"ref": []any{vault}, "confirm": true})
+	ok("pass_vaults_delete", map[string]any{"ref": []any{vault2}, "confirm": true})
 }
