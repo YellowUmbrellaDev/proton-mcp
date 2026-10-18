@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	gopenpgp "github.com/ProtonMail/gopenpgp/v3/crypto"
@@ -325,34 +326,94 @@ func signedPart(name, uid string, emails []string, previous ...vcard.Signed) vca
 // contactsPageSize is how many contacts one export request asks for.
 const contactsPageSize = 50
 
+// listConcurrency is how many export pages are in flight at once once the first
+// page has said how many there are. Proton answers each page in about 2.5 s no
+// matter how little it holds, so the walk is bound by round trips, not by
+// decryption (the whole book opens in under a second of CPU).
+const listConcurrency = 4
+
+// List reads the whole address book.
+//
+// The first page comes back with the book's size, which is what lets the other
+// pages be asked for together instead of one after another: 1345 contacts are 27
+// pages, and in sequence that is over a minute of waiting for the same answer.
+// A book that grows while it is read is complete as of its first page; the next
+// call has the rest. Without a size the walk is page by page until one is short.
 func (s *Service) List(ctx context.Context) ([]Contact, error) {
-	return proton.All(ctx, func(ctx context.Context, page int) ([]Contact, bool, error) {
-		var r struct {
-			Contacts []struct {
-				ID    string
-				Cards []map[string]any
-			}
+	var first exportPage
+	u, err := s.keys.Alongside(ctx, func(ctx context.Context) error { return s.exportPage(ctx, 0, &first) })
+	if err != nil {
+		return nil, err
+	}
+	all := s.openPage(ctx, first, u)
+
+	if first.Total > 0 {
+		pages := (first.Total + contactsPageSize - 1) / contactsPageSize
+		if pages <= 1 {
+			return all, nil
 		}
-		q := proton.Query("Page", fmt.Sprintf("%d", page), "PageSize", fmt.Sprintf("%d", contactsPageSize))
-		// The first page and the keys are asked for together; every page after it
-		// finds them already there.
-		u, err := s.keys.Alongside(ctx, func(ctx context.Context) error {
-			return s.C.Decode(ctx, proton.Request{Method: "GET", Path: "/contacts/v4/contacts/export", Query: q}, &r)
-		})
-		if err != nil {
-			return nil, false, err
+		rest := make([]exportPage, pages-1)
+		failed := make([]error, pages-1)
+		sem := make(chan struct{}, listConcurrency)
+		var wg sync.WaitGroup
+		for i := range rest {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				failed[i] = s.exportPage(ctx, i+1, &rest[i])
+			}()
 		}
-		out := make([]Contact, 0, len(r.Contacts))
-		for _, c := range r.Contacts {
-			ct, err := openContact(c.ID, c.Cards, u)
+		wg.Wait()
+		for _, err := range failed {
 			if err != nil {
-				skip.Record(ctx, skip.KindContact, c.ID, u.Shut(sealedCard(c.Cards)), err)
-				continue
+				return nil, err
 			}
-			out = append(out, ct)
 		}
-		return out, proton.Full(r.Contacts, contactsPageSize), nil
-	})
+		for _, pg := range rest {
+			all = append(all, s.openPage(ctx, pg, u)...)
+		}
+		return all, nil
+	}
+
+	for page, more := 1, proton.Full(first.Contacts, contactsPageSize); more && page < 1000; page++ {
+		var pg exportPage
+		if err := s.exportPage(ctx, page, &pg); err != nil {
+			return nil, err
+		}
+		all = append(all, s.openPage(ctx, pg, u)...)
+		more = proton.Full(pg.Contacts, contactsPageSize)
+	}
+	return all, nil
+}
+
+// exportPage is one page of the encrypted export, as Proton sent it.
+type exportPage struct {
+	Total    int
+	Contacts []struct {
+		ID    string
+		Cards []map[string]any
+	}
+}
+
+func (s *Service) exportPage(ctx context.Context, page int, out *exportPage) error {
+	q := proton.Query("Page", fmt.Sprintf("%d", page), "PageSize", fmt.Sprintf("%d", contactsPageSize))
+	return s.C.Decode(ctx, proton.Request{Method: "GET", Path: "/contacts/v4/contacts/export", Query: q}, out)
+}
+
+// openPage decrypts a page, recording the contacts that would not open.
+func (s *Service) openPage(ctx context.Context, pg exportPage, u *keys.Unlocked) []Contact {
+	out := make([]Contact, 0, len(pg.Contacts))
+	for _, c := range pg.Contacts {
+		ct, err := openContact(c.ID, c.Cards, u)
+		if err != nil {
+			skip.Record(ctx, skip.KindContact, c.ID, u.Shut(sealedCard(c.Cards)), err)
+			continue
+		}
+		out = append(out, ct)
+	}
+	return out
 }
 
 func (s *Service) Get(ctx context.Context, id string) (*Contact, error) {
