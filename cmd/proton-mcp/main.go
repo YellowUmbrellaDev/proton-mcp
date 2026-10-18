@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -97,6 +98,10 @@ func main() {
 		login, err := newLogin()
 		if err != nil {
 			log.Fatal(err)
+		}
+		if c, ok := login.(io.Closer); ok {
+			// Revokes the sign-ins nobody finished, so shutdown leaves no session at Proton.
+			defer func() { _ = c.Close() }()
 		}
 		authSrv, err = mcpauth.New(mcpauth.Config{Issuer: base, StatePath: *state, Key: key, Login: login, ClientIP: clientIP})
 		if err != nil {
