@@ -275,3 +275,55 @@ func TestLiveSend(t *testing.T) {
 	}
 	t.Logf("arrived: %d bytes of body", len(func() string { b, _ := call(t, cs, "mail_messages_get", map[string]any{"ref": found}); return b }()))
 }
+
+func TestLiveCalendarAndPass(t *testing.T) {
+	cs := live(t)
+	tag := "proton-mcp-test-" + time.Now().Format("150405")
+	ok := func(name string, args map[string]any) string {
+		out, isErr := call(t, cs, name, args)
+		t.Logf("%-26s err=%-5v %.100q", name, isErr, strings.ReplaceAll(out, "\n", " "))
+		if isErr {
+			t.Fatalf("%s failed: %s", name, out)
+		}
+		return out
+	}
+	idsOf := func(raw string) []string {
+		var m struct {
+			IDs []string `json:"ids"`
+		}
+		_ = json.Unmarshal([]byte(raw), &m)
+		return m.IDs
+	}
+
+	// --- Calendar: create, update, read back, delete.
+	start := time.Now().Add(72 * time.Hour).Format("2006-01-02 15:04")
+	ev := idsOf(ok("calendar_events_create", map[string]any{"title": tag, "start": start, "duration": "30m", "location": "MCP"}))
+	if len(ev) != 1 {
+		t.Fatalf("expected one event id, got %v", ev)
+	}
+	t.Cleanup(func() { call(t, cs, "calendar_events_delete", map[string]any{"ref": []any{ev[0]}, "confirm": true}) })
+	ok("calendar_events_update", map[string]any{"ref": ev[0], "location": "MCP actualizado"})
+	if got := ok("calendar_events_get", map[string]any{"ref": ev[0]}); !strings.Contains(got, "MCP actualizado") {
+		t.Errorf("event update not visible: %.300s", got)
+	}
+	ok("calendar_events_delete", map[string]any{"ref": []any{ev[0]}, "confirm": true})
+
+	// --- Pass: a vault of its own, an item inside, trash, delete, remove the vault.
+	vault := idsOf(ok("pass_vaults_create", map[string]any{"name": tag}))
+	if len(vault) != 1 {
+		t.Fatalf("expected one vault id, got %v", vault)
+	}
+	t.Cleanup(func() { call(t, cs, "pass_vaults_delete", map[string]any{"ref": vault[0], "confirm": true}) })
+	item := idsOf(ok("pass_items_create", map[string]any{
+		"type": "login", "into": vault[0], "name": tag, "username": "u", "generate_password": true, "url": []any{"example.com"},
+	}))
+	if len(item) != 1 {
+		t.Fatalf("expected one item id, got %v", item)
+	}
+	if got := ok("pass_items_get", map[string]any{"ref": item[0]}); !strings.Contains(got, tag) {
+		t.Errorf("item not readable: %.200s", got)
+	}
+	ok("pass_items_trash", map[string]any{"ref": []any{item[0]}})
+	ok("pass_items_delete", map[string]any{"ref": []any{item[0]}, "confirm": true})
+	ok("pass_vaults_delete", map[string]any{"ref": vault[0], "confirm": true})
+}

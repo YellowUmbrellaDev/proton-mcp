@@ -31,6 +31,10 @@ type Runner struct {
 	// Confirm is the confirmation policy handed to every command ("" is the
 	// CLI's own).
 	Confirm string
+	// Zone is the IANA time zone commands work in. A server has no zone of its
+	// own worth trusting: the CLI would read /etc/localtime, which on most hosts
+	// resolves to "Etc/UTC", a name Proton refuses. "" means UTC.
+	Zone string
 }
 
 // Call runs one tool with the caller's input.
@@ -55,7 +59,11 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 		dry, held = true, true
 	}
 
-	global := []string{"--output", "json", "--no-input", "--no-log", "--quiet", "--profile", r.Profile}
+	zone := r.Zone
+	if zone == "" {
+		zone = "UTC"
+	}
+	global := []string{"--output", "json", "--no-input", "--no-log", "--quiet", "--profile", r.Profile, "--zone", zone}
 	if r.Confirm != "" {
 		global = append(global, "--confirm", r.Confirm)
 	}
@@ -66,7 +74,7 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 		global = append(global, "--yes")
 	}
 	if t.Download {
-		global = []string{"--no-input", "--no-log", "--quiet", "--profile", r.Profile}
+		global = []string{"--no-input", "--no-log", "--quiet", "--profile", r.Profile, "--zone", zone}
 	}
 	full := append(append([]string{}, global...), t.Path...)
 	if t.Download {

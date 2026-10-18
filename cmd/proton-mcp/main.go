@@ -25,6 +25,7 @@ func main() {
 		token     = flag.String("token-file", "", "file holding the bearer token HTTP clients must present")
 		enableAPI = flag.Bool("enable-api", false, "expose the raw `api` command")
 		confirm   = flag.String("confirm", "", "confirmation policy handed to every command")
+		zone      = flag.String("zone", "UTC", "IANA time zone commands work in")
 		list      = flag.Bool("list", false, "print the tools and exit")
 	)
 	flag.Parse()
@@ -42,7 +43,7 @@ func main() {
 		return
 	}
 
-	runner := mcpserver.Runner{Profile: *profile, Confirm: *confirm}
+	runner := mcpserver.Runner{Profile: *profile, Confirm: *confirm, Zone: *zone}
 	server, tools, err := mcpserver.New(mcpserver.Config{
 		Version: version,
 		Options: opts,
