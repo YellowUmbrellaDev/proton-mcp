@@ -8,6 +8,8 @@ import (
 	"net/http"
 )
 
+// Referrer-Policy is same-origin, not no-referrer: with no-referrer browsers
+// send "Origin: null" on the consent form POST, which the Origin check refuses.
 // Every HTML page carries the same headers. The policy allows no network
 // access but fetches to the server itself (the status poll), only inline styles,
 // only images inlined as data: URIs (the QR code), and only the script that
@@ -23,7 +25,7 @@ func pageHeaders(w http.ResponseWriter, nonce, formAction string) {
 	h.Set("Content-Security-Policy",
 		"default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-"+nonce+"'; "+
 			"connect-src 'self'; form-action "+fa+"; frame-ancestors 'none'; base-uri 'none'")
-	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Referrer-Policy", "same-origin")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Cache-Control", "no-store")

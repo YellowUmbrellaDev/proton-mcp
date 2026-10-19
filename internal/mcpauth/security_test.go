@@ -488,7 +488,7 @@ func TestHTMLHeadersAndEscaping(t *testing.T) {
 		}
 	}
 	for k, v := range map[string]string{
-		"Referrer-Policy":        "no-referrer",
+		"Referrer-Policy":        "same-origin",
 		"X-Content-Type-Options": "nosniff",
 		"Cache-Control":          "no-store",
 	} {
