@@ -137,7 +137,8 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 		res.Text = "Nothing was changed. This cannot be undone, so it was only previewed:\n\n" +
 			res.Text + "\n\nCall again with confirm: true to do it."
 	}
-	if strings.TrimSpace(res.Text) == "" && res.Blob == nil {
+	// A downloaded file may be empty, or only whitespace: that is its content.
+	if res.Name == "" && strings.TrimSpace(res.Text) == "" && res.Blob == nil {
 		res.Text = "Done."
 	}
 	return res

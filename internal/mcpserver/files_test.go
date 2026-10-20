@@ -149,3 +149,14 @@ func TestDownloadURINamesTheFile(t *testing.T) {
 		t.Errorf("uri = %s, want %s", got, want)
 	}
 }
+
+func TestEmptyDownloadStaysEmpty(t *testing.T) {
+	r := Result{Name: "empty.txt", MIMEType: "text/plain", URI: "proton://x/empty.txt"}
+	res := toResult(r, NewStore(), "ana")
+	if tc, ok := res.Content[0].(*mcp.TextContent); !ok || tc.Text != "" {
+		t.Fatalf("content = %#v", res.Content[0])
+	}
+	if m := structured(t, res); m["size"] != float64(0) {
+		t.Errorf("structuredContent = %v", m)
+	}
+}
