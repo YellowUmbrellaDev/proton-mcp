@@ -22,6 +22,8 @@ type Config struct {
 	// Record is told the outcome of every call. It is how coverage is measured:
 	// which tools have really run, against a real account, and which only exist.
 	Record func(t Tool, r Result)
+	// Files keeps the downloads too large to return inline. Nil gets a fresh one.
+	Files *Store
 }
 
 // observe tells the configured hook about a call, if there is one.
@@ -38,6 +40,10 @@ func New(c Config) (*mcp.Server, []Tool, error) {
 		return nil, nil, err
 	}
 	s := mcp.NewServer(&mcp.Implementation{Name: "proton-mcp", Version: c.Version}, nil)
+	if c.Files == nil {
+		c.Files = NewStore()
+	}
+	addFileResources(s, c.Files, c.Runner)
 	for _, t := range tools {
 		t := t
 		s.AddTool(&mcp.Tool{
@@ -64,7 +70,7 @@ func New(c Config) (*mcp.Server, []Tool, error) {
 			}
 			res := run.Call(ctx, t, in)
 			c.observe(t, res)
-			return toResult(res), nil
+			return toResult(res, c.Files, run.Profile), nil
 		})
 	}
 	return s, tools, nil
@@ -74,13 +80,41 @@ func textResult(text string, isErr bool) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}, IsError: isErr}
 }
 
-func toResult(r Result) *mcp.CallToolResult {
-	if r.Blob != nil {
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.EmbeddedResource{
-			Resource: &mcp.ResourceContents{URI: "proton://download/" + r.Name, MIMEType: "application/octet-stream", Blob: r.Blob},
-		}}}
+// toResult shapes a call's outcome. A download says what it is in
+// structuredContent, and carries its bytes only when they are small enough to
+// travel with it; a larger one is kept and linked, to be read in pieces.
+func toResult(r Result, store *Store, owner string) *mcp.CallToolResult {
+	if r.Name == "" {
+		return textResult(r.Text, r.IsError)
 	}
-	return textResult(r.Text, r.IsError)
+	data := r.Blob
+	if data == nil {
+		data = []byte(r.Text)
+	}
+	info := fileInfo{Name: r.Name, Size: len(data), MIMEType: r.MIMEType, URI: r.URI, Inline: len(data) <= InlineLimit}
+	out := &mcp.CallToolResult{StructuredContent: info}
+	if info.Inline {
+		if r.Blob == nil {
+			out.Content = []mcp.Content{&mcp.TextContent{Text: r.Text}}
+		} else {
+			out.Content = []mcp.Content{&mcp.EmbeddedResource{
+				Resource: &mcp.ResourceContents{URI: r.URI, MIMEType: r.MIMEType, Blob: r.Blob},
+			}}
+		}
+		return out
+	}
+	if err := store.Put(owner, r.URI, r.MIMEType, data); err != nil {
+		return textResult(err.Error(), true)
+	}
+	info.ChunkSize = ChunkLimit
+	info.ReadWith = fmt.Sprintf("resources/read %s?offset=0&length=%d", r.URI, ChunkLimit)
+	out.StructuredContent = info
+	size := int64(len(data))
+	out.Content = []mcp.Content{
+		&mcp.TextContent{Text: fmt.Sprintf("%s (%s, %d bytes) is too large to return inline. Read it with resources/read on %s, in pieces of at most %d bytes using ?offset=N&length=M; it is kept for %s.", r.Name, r.MIMEType, len(data), r.URI, ChunkLimit, storeTTL)},
+		&mcp.ResourceLink{URI: r.URI, Name: r.Name, MIMEType: r.MIMEType, Size: &size},
+	}
+	return out
 }
 
 func annotations(t Tool) *mcp.ToolAnnotations {
