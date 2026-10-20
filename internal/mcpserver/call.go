@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,14 +15,19 @@ import (
 
 	"github.com/roman-16/proton-cli/internal/app"
 	"github.com/roman-16/proton-cli/internal/cli"
+	"github.com/roman-16/proton-cli/internal/mimetype"
 )
 
 // Result is what one call produced.
 type Result struct {
 	Text    string
 	Blob    []byte
-	Name    string
 	IsError bool
+	// A download also says what it fetched: the file's own name, its type, and
+	// the uri it is known by. The bytes are Blob, or Text when they are text.
+	Name     string
+	MIMEType string
+	URI      string
 	// Held says the call was only previewed (an irreversible tool without
 	// confirm), so nothing was changed.
 	Held bool
@@ -82,6 +88,7 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 	if !t.Download {
 		global = append(global, "--output", "json")
 	}
+	out := filepath.Join(dir, "download")
 	if r.Confirm != "" {
 		global = append(global, "--confirm", r.Confirm)
 	}
@@ -93,14 +100,15 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 	}
 	full := append(append([]string{}, global...), t.Path...)
 	if t.Download {
-		// The payload goes to standard output and comes back in the result; the
-		// flag has to precede the `--` that ends the flags.
-		full = append(full, "--dest=-")
+		// The file is written under its own name into a directory of ours and
+		// read back, which is how the result knows that name; the flag has to
+		// precede the `--` that ends the flags.
+		full = append(full, "--dest-dir="+out)
 	}
 	full = append(full, args...)
 
-	var out, errw bytes.Buffer
-	code, runErr := cli.Run(ctx, full, app.Streams{Out: &out, Err: &errw, In: bytes.NewReader(nil)})
+	var stdout, errw bytes.Buffer
+	code, runErr := cli.Run(ctx, full, app.Streams{Out: &stdout, Err: &errw, In: bytes.NewReader(nil)})
 	if runErr != nil || code != 0 {
 		msg := strings.TrimSpace(errw.String())
 		if msg == "" && runErr != nil {
@@ -110,14 +118,20 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 	}
 	res := Result{Held: held, DryRun: dry}
 	switch {
-	case t.Download && !utf8.Valid(out.Bytes()):
-		res.Blob = out.Bytes()
-		res.Name = strings.Join(t.Path, "_")
 	case t.Download:
-		// A file's own leading and trailing whitespace is part of its content.
-		res.Text = out.String()
+		name, data, err := readDownload(out)
+		if err != nil {
+			return failure("%v", err)
+		}
+		res.Name, res.MIMEType, res.URI = name, mimetype.ByName(name), downloadURI(t, input, name)
+		if utf8.Valid(data) {
+			// A file's own leading and trailing whitespace is part of its content.
+			res.Text = string(data)
+		} else {
+			res.Blob = data
+		}
 	default:
-		res.Text = strings.TrimSpace(out.String())
+		res.Text = strings.TrimSpace(stdout.String())
 	}
 	if held {
 		res.Text = "Nothing was changed. This cannot be undone, so it was only previewed:\n\n" +
@@ -127,6 +141,26 @@ func (r Runner) Call(ctx context.Context, t Tool, input map[string]any) Result {
 		res.Text = "Done."
 	}
 	return res
+}
+
+// readDownload returns the one file a download command wrote under dir.
+func readDownload(dir string) (name string, data []byte, err error) {
+	var found []string
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			found = append(found, p)
+		}
+		return nil
+	})
+	if len(found) != 1 {
+		return "", nil, fmt.Errorf("a download returns exactly one file, and this one produced %d: pick a single item", len(found))
+	}
+	data, err = os.ReadFile(found[0])
+	if err != nil {
+		return "", nil, err
+	}
+	rel, _ := filepath.Rel(dir, found[0])
+	return filepath.ToSlash(rel), data, nil
 }
 
 func failure(format string, a ...any) Result {

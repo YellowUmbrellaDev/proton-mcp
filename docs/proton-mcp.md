@@ -30,6 +30,12 @@
 
 Every HTTP mode serves `GET /healthz`, which answers `200 ok` without authentication, for container health checks.
 
+## Downloads
+
+A download tool (attachments, Drive items) names the file in `structuredContent` (`name`, `size`, `mimeType`, `uri`, `inline`). The `uri` is `proton://<command path>/<references>/<file name>`, and the mime type comes from the file's name.
+
+A file up to 512 KiB comes back inline. A larger one is not: the result holds a `resource_link` instead, and the file is read with `resources/read` on that `uri`, at most 512 KiB at a time, with `?offset=N&length=M`. The server keeps it for 30 minutes, for the session that downloaded it and nobody else, up to 256 MiB in all.
+
 ## OAuth mode
 
 One mux serves everything:
